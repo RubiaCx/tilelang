@@ -60,14 +60,156 @@ def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
     return out
 
 
+def get_configs_joint():
+    """Joint调优：同时调优所有参数（简化版，避免卡住）"""
+    configs = []
+    
+    # 论文中的关键配置 - 优先测试
+    paper_configs = [
+        # PT-Joint偏好：64×64 (更好的流水线)
+        {'block_M': 64, 'block_N': 64, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 1},
+        {'block_M': 64, 'block_N': 64, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+        
+        # PT-Decouple偏好：64×128 (更好的内存利用)  
+        {'block_M': 64, 'block_N': 128, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 1},
+        {'block_M': 64, 'block_N': 128, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+    ]
+    configs.extend(paper_configs)
+    
+    # 只使用最稳定的小配置，避免卡住
+    stable_configs = [
+        # 小配置组合
+        {'block_M': 64, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 1},
+        {'block_M': 64, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+        {'block_M': 128, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 1},
+        {'block_M': 128, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+        {'block_M': 128, 'block_N': 64, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 1},
+        {'block_M': 128, 'block_N': 64, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+    ]
+    
+    # 添加稳定配置，避免重复
+    for config in stable_configs:
+        if config not in configs:
+            configs.append(config)
+    
+    print(f"Joint配置数量: {len(configs)} (简化版，包含论文关键配置)")
+    return configs
+
+
+def get_configs_decouple_tiles():
+    """Decouple调优阶段1：固定stage=2，调优tile参数（超级简化版）"""
+    configs = [
+        # 论文关键配置
+        {'block_M': 64, 'block_N': 64, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},   # PT-Joint偏好
+        {'block_M': 64, 'block_N': 128, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},  # PT-Decouple偏好
+        # 基础配置
+        # {'block_M': 64, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+        {'block_M': 128, 'block_N': 32, 'block_K': 64, 'block_Dstate': 128, 'num_stages': 2},
+    ]
+    
+    return configs
+
+
+def get_configs_decouple_stages(best_tile_config):
+    """Decouple调优阶段2：固定tile参数，调优stage参数"""
+    num_stages = [1, 2, 3]  # 只用低stage数避免卡住
+    configs = [
+        {
+            'block_M': best_tile_config['block_M'], 
+            'block_N': best_tile_config['block_N'], 
+            'block_K': best_tile_config['block_K'], 
+            'block_Dstate': best_tile_config['block_Dstate'], 
+            'num_stages': s
+        }
+        for s in num_stages
+    ]
+    print(f"Stage配置数量: {len(configs)} (限制为低stage数)")
+    return configs
+
+
+# 保持原有函数用于向后兼容
 def get_configs():
-    iter_params = dict(
-        block_M=[64, 128, 256],
-        block_N=[32, 64],
-        block_K=[64, 128, 256],
-        block_Dstate=[128],
-        num_stages=[1, 2, 3, 4, 5])
-    return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+    """默认配置：简单的joint调优"""
+    return get_configs_joint()
+
+
+@autotune(configs=get_configs_joint(), warmup=10, rep=10)
+@tilelang.jit(out_idx=[7])
+def chunk_scan_fwd_joint(batch,
+                         seqlen,
+                         chunk_size,
+                         ngroups,
+                         nheads,
+                         headdim,
+                         dstate,
+                         block_M=64,
+                         block_N=64,
+                         block_K=64,
+                         block_Dstate=128,
+                         num_stages=2,
+                         threads=128):
+    """Joint调优：同时调优所有参数"""
+    return chunk_scan_fwd_kernel(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
+                               block_M, block_N, block_K, block_Dstate, num_stages, threads)
+
+
+@autotune(configs=get_configs_decouple_tiles(), warmup=10, rep=10)
+@tilelang.jit(out_idx=[7])
+def chunk_scan_fwd_decouple_tiles(batch,
+                                  seqlen,
+                                  chunk_size,
+                                  ngroups,
+                                  nheads,
+                                  headdim,
+                                  dstate,
+                                  block_M=64,
+                                  block_N=64,
+                                  block_K=64,
+                                  block_Dstate=128,
+                                  num_stages=2,
+                                  threads=128):
+    """Decouple调优阶段1：固定stage=2，调优tile参数"""
+    return chunk_scan_fwd_kernel(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
+                               block_M, block_N, block_K, block_Dstate, num_stages, threads)
+
+
+def chunk_scan_fwd_decouple(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate):
+    """Decouple调优：分两阶段执行"""
+    print("阶段1：固定stage=2，调优tile参数...")
+    
+    # 阶段1：调优tile参数
+    tile_kernel = chunk_scan_fwd_decouple_tiles(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate)
+    best_tile_config = tile_kernel.config
+    
+    print(f"阶段1最佳tile配置：{best_tile_config}")
+    print("阶段2：固定tile参数，调优stage参数...")
+    
+    # 创建阶段2的配置
+    stage_configs = get_configs_decouple_stages(best_tile_config)
+    
+    # 阶段2：调优stage参数
+    @autotune(configs=stage_configs, warmup=10, rep=10)
+    @tilelang.jit(out_idx=[7])
+    def chunk_scan_fwd_decouple_stages(batch=batch,
+                                       seqlen=seqlen,
+                                       chunk_size=chunk_size,
+                                       ngroups=ngroups,
+                                       nheads=nheads,
+                                       headdim=headdim,
+                                       dstate=dstate,
+                                       block_M=64,
+                                       block_N=64,
+                                       block_K=64,
+                                       block_Dstate=128,
+                                       num_stages=2,
+                                       threads=128):
+        return chunk_scan_fwd_kernel(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
+                                   block_M, block_N, block_K, block_Dstate, num_stages, threads)
+    
+    stage_kernel = chunk_scan_fwd_decouple_stages(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate)
+    print(f"阶段2最佳stage配置：{stage_kernel.config}")
+    
+    return stage_kernel
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
@@ -85,13 +227,19 @@ def chunk_scan_fwd(batch,
                    block_Dstate=128,
                    num_stages=2,
                    threads=128):
+    return chunk_scan_fwd_kernel(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
+                               block_M, block_N, block_K, block_Dstate, num_stages, threads)
+
+
+def chunk_scan_fwd_kernel(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
+                         block_M, block_N, block_K, block_Dstate, num_stages, threads):
     dtype = "float16"
     accum_dtype = "float"
     nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504
 
     @T.prim_func
-    def main(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype), x: T.Tensor(
+    def kernel_impl(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype), x: T.Tensor(
         (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
             (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
                 (batch, nheads, nchunks, chunk_size), dtype),
@@ -193,24 +341,87 @@ def chunk_scan_fwd(batch,
                 Output[batch_idx, chunk_idx * chunk_size + m_idx * block_M:chunk_idx * chunk_size +
                        (m_idx + 1) * block_M, bz, n_idx * block_N:(n_idx + 1) * block_N])
 
-    return main
+    return kernel_impl
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=80, help='heads')
+    parser.add_argument('--heads', type=int, default=64, help='heads')
     parser.add_argument('--groups', type=int, default=1, help='groups')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
+    parser.add_argument('--seq_len', type=int, default=2048, help='sequence length')
     parser.add_argument('--chunk_size', type=int, default=256, help='chunk size')
     parser.add_argument('--dim', type=int, default=64, help='dim')
     parser.add_argument('--dstate', type=int, default=128, help='dstate')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument('--tune_mode', type=str, choices=['joint', 'decouple', 'none'], default='none', help='调优模式：joint(联合调优), decouple(分离调优), none(不调优)')
+    parser.add_argument('--reproduce_paper', action='store_true', help='使用论文中的参数设置 (BS=64, SEQ=8k)')
     args = parser.parse_args()
-    batch, heads, groups, seq_len, chunk_size, dim, dstate = args.batch, args.heads, args.groups, args.seq_len, args.chunk_size, args.dim, args.dstate
+    
+    if args.reproduce_paper:
+        # 论文参数：BS=64, SEQ=8k
+        batch, heads, groups, seq_len, chunk_size, dim, dstate = 64, 64, 1, 8192, 256, 64, 128
+        print("使用论文参数：BS=64, SEQ=8k (ChunkScan pattern)")
+    else:
+        # 用户指定参数
+        batch, heads, groups, seq_len, chunk_size, dim, dstate = args.batch, args.heads, args.groups, args.seq_len, args.chunk_size, args.dim, args.dstate
+        print(f"使用自定义参数：BS={batch}, SEQ={seq_len}")
+    
+    # 设置固定随机种子确保测试数据一致
+    torch.manual_seed(42)
     total_flops = 2 * batch * seq_len * chunk_size * heads * dim * 0.5 + 2 * batch * seq_len * heads * dim * dstate
 
-    if (not args.tune):
+    if args.tune_mode == 'joint':
+        print("\n=== Joint调优模式 ===")
+        print("使用Joint调优模式...")
+        kernel = chunk_scan_fwd_joint(batch, seq_len, chunk_size, groups, heads, dim, dstate)
+        best_latency = kernel.latency
+        best_config = kernel.config
+        print(f"Joint最佳延迟: {best_latency:.4f} ms")
+        print(f"Joint最佳TFlops: {total_flops / best_latency * 1e-9:.2f}")
+        print(f"Joint最佳配置: {best_config}")
+        
+        # 论文复现分析
+        if args.reproduce_paper:
+            print("\n=== 论文复现分析 ===")
+            print(f"论文PT-Joint结果: 6.981 ms (BS=64, SEQ=8k)")
+            print(f"当前Joint结果: {best_latency:.4f} ms")
+            print(f"性能比较: {6.981 / best_latency:.2f}x (>1表示当前更快)")
+            tile_shape = f"{best_config['block_M']}×{best_config['block_N']}"
+            print(f"最佳tile形状: {tile_shape}")
+            if tile_shape == "64×64":
+                print("✓ 与论文PT-Joint预期一致 (64×64, 更好的流水线)")
+            elif tile_shape == "64×128":
+                print("! 更接近PT-Decouple偏好 (64×128, 更好的内存利用)")
+            else:
+                print(f"? 发现了不同的最优配置: {tile_shape}")
+        
+    elif args.tune_mode == 'decouple':
+        print("\n=== Decouple调优模式 ===")
+        print("使用Decouple调优模式...")
+        kernel = chunk_scan_fwd_decouple(batch, seq_len, chunk_size, groups, heads, dim, dstate)
+        best_latency = kernel.latency
+        best_config = kernel.config
+        print(f"Decouple最佳延迟: {best_latency:.4f} ms")
+        print(f"Decouple最佳TFlops: {total_flops / best_latency * 1e-9:.2f}")
+        print(f"Decouple最佳配置: {best_config}")
+        
+        # 论文复现分析
+        if args.reproduce_paper:
+            print("\n=== 论文复现分析 ===")
+            print(f"论文PT-Decouple结果: 12.150 ms (BS=64, SEQ=8k)")
+            print(f"当前Decouple结果: {best_latency:.4f} ms")
+            print(f"性能比较: {12.150 / best_latency:.2f}x (>1表示当前更快)")
+            tile_shape = f"{best_config['block_M']}×{best_config['block_N']}"
+            print(f"最佳tile形状: {tile_shape}")
+            if tile_shape == "64×128":
+                print("✓ 与论文PT-Decouple预期一致 (64×128, 更好的内存利用)")
+            elif tile_shape == "64×64":
+                print("! 更接近PT-Joint偏好 (64×64, 更好的流水线)")
+            else:
+                print(f"? 发现了不同的最优配置: {tile_shape}")
+    
+    else:
+        print("\n=== 固定配置运行 ===")
         kernel = chunk_scan_fwd(
             batch,
             seq_len,
@@ -232,13 +443,35 @@ if __name__ == "__main__":
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-    else:
-        kernel = chunk_scan_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
-        best_latency = kernel.latency
-        best_config = kernel.config
-        ref_latency = kernel.ref_latency
-        print(f"Best latency: {best_latency}")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
-        print(f"Best config: {best_config}")
+        print("固定配置延迟: {:.4f} ms".format(latency))
+        print("固定配置TFlops: {:.2f}".format(total_flops / latency * 1e-9))
+        
+        if args.reproduce_paper:
+            print("\n=== 固定配置vs论文对比 ===")
+            print(f"论文Triton结果: 13.332 ms (BS=64, SEQ=8k)")
+            print(f"当前固定配置: {latency:.4f} ms")
+            print(f"性能比较: {13.332 / latency:.2f}x")
+
+
+print("""
+使用说明：
+
+# 复现论文实验（推荐）
+python example_mamba_chunk_scan.py --tune_mode joint --reproduce_paper
+python example_mamba_chunk_scan.py --tune_mode decouple --reproduce_paper
+
+# 默认参数测试
+python example_mamba_chunk_scan.py --tune_mode joint
+python example_mamba_chunk_scan.py --tune_mode decouple
+
+# 快速测试
+python example_mamba_chunk_scan.py --tune_mode none
+
+关键观察点：
+1. Joint vs Decouple的性能差异
+2. 最佳配置的tile形状选择 (64×64 vs 64×128)
+3. stage数对性能的影响
+4. 与论文结果的趋势对比（不要求绝对数值匹配）
+
+TileLang vs TVM-TL 框架差异可能导致结果不完全一致，但趋势应该相似。
+""")

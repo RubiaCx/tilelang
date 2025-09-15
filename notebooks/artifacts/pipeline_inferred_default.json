@@ -1,0 +1,58 @@
+[
+  {
+    "block_M": 64,
+    "block_N": 64,
+    "num_stages": 1,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 64,
+    "block_N": 64,
+    "num_stages": 2,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 64,
+    "block_N": 128,
+    "num_stages": 1,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 64,
+    "block_N": 128,
+    "num_stages": 2,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 128,
+    "block_N": 64,
+    "num_stages": 1,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 128,
+    "block_N": 64,
+    "num_stages": 2,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 128,
+    "block_N": 128,
+    "num_stages": 1,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  },
+  {
+    "block_M": 128,
+    "block_N": 128,
+    "num_stages": 2,
+    "threads": 128,
+    "summary": "BARRIER->TMA | BARRIER->TMA"
+  }
+]
