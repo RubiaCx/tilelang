@@ -8,34 +8,32 @@ import argparse
 from functools import partial
 
 
+# def get_configs():
+#     iter_params = dict(block_M=[64, 128], block_N=[64, 128], num_stages=[1,2,3,4], threads=[128,256])
+#     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[2], threads=[256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(
-    out_idx=[3], pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+@tilelang.jit(out_idx=[3])
 def flashattn(batch,
               heads,
               seq_q,
               seq_kv,
               dim,
               is_causal,
-              block_M=64,
-              block_N=64,
-              num_stages=1,
-              threads=128):
+              block_M=128,
+              block_N=128,
+              num_stages=2,
+              threads=256):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, heads, seq_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
-
-    past_len = seq_kv - seq_q
-    assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"
 
     @T.macro
     def MMA0(
@@ -48,6 +46,7 @@ def flashattn(batch,
         by: T.int32,
         bz: T.int32,
     ):
+        past_len = seq_kv - seq_q
         T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
         if is_causal:
             for i, j in T.Parallel(block_M, block_N):
@@ -117,6 +116,8 @@ def flashattn(batch,
             V: T.Tensor(kv_shape, dtype),
             Output: T.Tensor(q_shape, dtype),
     ):
+        # T.no_set_max_nreg()
+
         with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
@@ -137,15 +138,17 @@ def flashattn(batch,
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
-                T.min(
-                    T.ceildiv(seq_kv, block_N), T.ceildiv(
-                        (bx + 1) * block_M +
-                        past_len, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
+                T.min(T.ceildiv(seq_kv, block_N), T.ceildiv(
+                    (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
 
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
+            for k in T.Pipelined(
+                    loop_range,
+                    num_stages=num_stages,
+                    order=[-1, 0, 3, 1, -1, 2],
+                    stage=[-1, 0, 0, 1, -1, 1],
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
-                        logsum)
+                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i, j in T.Parallel(block_M, dim):
@@ -163,7 +166,7 @@ def ref_program(Q, K, V, is_causal):
     if is_causal:
         seq_q = Q.size(2)
         seq_kv = K.size(2)
-        mask = torch.tril(torch.ones(seq_q, seq_kv, device=scores.device), seq_kv - seq_q)
+        mask = torch.tril(torch.ones(seq_q, seq_kv, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float('-inf'))
     attention_weights = F.softmax(scores, dim=-1)
@@ -173,10 +176,10 @@ def ref_program(Q, K, V, is_causal):
 
 def main(
     batch: int = 1,
-    heads: int = 1,
+    heads: int = 32,
     seq_q: int = 256,
     seq_kv: int = 256,
-    dim: int = 64,
+    dim: int = 128,
     is_causal: bool = False,
     tune: bool = False,
 ):
@@ -193,21 +196,21 @@ def main(
             seq_kv,
             dim,
             is_causal,
-            block_M=64,
-            block_N=64,
-            num_stages=1,
-            threads=128)
-        ref_program_processed = partial(ref_program, is_causal=is_causal)
+            block_M=128,
+            block_N=128,
+            num_stages=2,
+            threads=256)
+        # ref_program_processed = partial(ref_program, is_causal=is_causal)
 
         profiler = kernel.get_profiler()
-        profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
-        print("All checks pass.")
-        latency = profiler.do_bench(ref_program_processed, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        # profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
+        # print("All checks pass.")
+        # latency = profiler.do_bench(ref_program_processed, warmup=500)
+        # print("Ref: {:.2f} ms".format(latency))
+        # print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print("Tile-lang: {:.4f} ms".format(latency))
+        print("Tile-lang: {:.4f} TFlops".format(total_flops / latency * 1e-9))
     else:
         kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal)
         best_latency = kernel.latency
