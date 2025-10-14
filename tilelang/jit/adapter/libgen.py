@@ -20,16 +20,13 @@ from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
-is_nvrtc_available = False
-NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
-                            "Please install cuda-python via `pip install cuda-python` " \
-                            "if you want to use the nvrtc backend."
 try:
-    import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda
-    is_nvrtc_available = True
+    from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+    if is_nvrtc_available:
+        import cuda.bindings.driver as cuda
+        from tilelang.contrib.nvrtc import compile_cuda
 except ImportError:
-    pass
+    is_nvrtc_available = False
 
 
 class LibraryGenerator(object):
@@ -67,7 +64,7 @@ class LibraryGenerator(object):
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
@@ -114,7 +111,7 @@ class LibraryGenerator(object):
 
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = get_rocm_arch(rocm_path)
@@ -131,7 +128,7 @@ class LibraryGenerator(object):
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
@@ -194,7 +191,9 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
-            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
+            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
+                              "Please install cuda-python via `pip install cuda-python` "
+                              "if you want to use the nvrtc backend.")
         super().__init__(target, verbose)
 
     @staticmethod
@@ -229,7 +228,7 @@ class PyLibraryGenerator(LibraryGenerator):
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cu", ".cubin")
 
             project_root = osp.join(osp.dirname(__file__), "..", "..")
@@ -243,7 +242,7 @@ class PyLibraryGenerator(LibraryGenerator):
             else:
                 tl_template_path = TILELANG_TEMPLATE_PATH
 
-            cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
+            cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
 
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
