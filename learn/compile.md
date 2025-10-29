@@ -338,81 +338,75 @@ else:
     # - commit_group/wait_group 同步
 ```
 
----
-
 ### Hopper 优化路径：TMA + Warp Specialization
 
-#### Pass 1：LowerSharedBarrier
+#### Pass 1：LowerSharedBarrier &　Pass 2：LowerSharedTmem
 
-  * **位置**：`phase.py:123`
-  * **注册**：`src/transform/lower_shared_barrier.cc:209`
-  * **作用**：在共享内存中创建并初始化 `mbarrier`（Barrier with Byte Counter），为 TMA 同步提供原语。
-  * **核心 API（概念）**：
+ - `LowerSharedBarrier` 将用户声明的 barrier buffer（用于线程同步）转换为底层的 PTX barrier 初始化调用
+   - 转换前
+     ``` python
+     data_is_ready = T.alloc_buffer((128,), "uint64", scope="shared.barrier")  
+     compute_is_done = T.alloc_buffer((128,), "uint64", scope="shared.barrier")
+     ```
+   - 转换后
+      ``` python
+      data_is_ready = T.alloc_buffer((1,), "uint64", scope="shared")  
+      compute_is_done = T.alloc_buffer((1,), "uint64", scope="shared")
+      if tx == 0:  # 或使用 shuffle_elect  
+        T.ptx_init_barrier_thread_count(data_is_ready[0], 128)  
+        T.ptx_init_barrier_thread_count(compute_is_done[0], 128)
+      ```
+    - `mbarrier` 是共享内存对象，需要**编译期确定地址**以便后续引用
 
-    ```cpp
-    // 初始化
-    mbarrier_init(&barrier, num_threads);
-    // Producer 发起异步传输前声明期望字节数
-    mbarrier_expect_tx(&barrier, bytes);
-    // 异步传输（TMA 自动递减计数）
-    tma_load_async(...);
-    // Producer 到达
-    mbarrier_arrive(&barrier);
-    // Consumer 等待（0/1 交替）
-    mbarrier_wait_parity(&barrier, parity);
+    - 实现在[src/transform/lower_shared_barrier.cc](https://github.com/tile-ai/tilelang/blob/main/src/transform/lower_shared_barrier.cc)
+
+  - `LowerSharedTmem` 的作用与 LowerSharedBarrier 类似，但针对 tensor memory buffer，将用户声明的 `shared.tmem` buffer 转换为底层的初始化调用，使得 Blackwell 架构的 TCGEN5 指令可以正确访问这些 buffer
+
+#### Pass 3：IfStmtBinding
+
+  - `IfStmtBinding` 的主要作用是将单个 if 语句展开为多个 if 语句，使得 if 条件应用到 then 分支中的每个子语句上，为 `if` 语句绑定条件/域信息，确保在流水线规划和 buffer 分配之前，if 语句已经被正确展开
+  - 转换前
+    ``` python
+    if condition:  
+      stmt1  
+      stmt2  
+      stmt3
     ```
-  * **固定槽位原因**：`mbarrier` 是共享内存对象，需要**编译期确定地址**以便后续引用。
-  * **实现示意**：
-
-    ```cpp
-    __shared__ alignas(8) uint64_t mbarrier[num_stages];
-    if (threadIdx.x == 0) {
-      for (int i = 0; i < num_stages; ++i) mbarrier_init(&mbarrier[i], threads_per_block);
-    }
-    __syncthreads();
+  - 转换后
+    ``` python
+    if condition:  
+        stmt1  
+    if condition:  
+        stmt2  
+    if condition:  
+        stmt3
     ```
 
-* **Pass 2：LowerSharedTmem**
+  - `IfStmtBinding` 和 `MergeIfStmt` 为互补Pass，在软件流水线注入过程中，`InjectSoftwarePipeline` 需要处理被 if 语句包装的循环体，`IfStmtBinding` 的展开使得流水线 pass 可以更细粒度地控制每个语句的执行条件，而 `MergeIfStmt` 则在流水线注入后清理冗余的 if 语句
+    
+#### Pass 4：MultiVersionBuffer
 
-  * **位置**：`phase.py:125`
-  * **注册**：`src/transform/lower_shared_tmem.cc:305`
-  * **作用**：下沉 `shared.tmem` 的初始化与占位，为 WGMMA 的共享内存 staging。
-  * **协同关系**：**TMA → shared.tmem → WGMMA**（由 `mbarrier` 进行同步）。
-
-#### 2.2 Warp Specialization
-
-* **Pass 3：IfStmtBinding**
-
-  * **位置**：`phase.py:128`
-  * **注册**：`src/transform/if_stmt_binding.cc:86`
-  * **作用**：为 `if` 语句绑定条件/域信息，便于后续 WS 与流水线规划理解控制流角色。
-
-* **Pass 4：MultiVersionBuffer**
-
-  * **位置**：`phase.py:128`
-  * **注册**：`src/transform/multi_version_buffer_rewriter.cc:331`
-  * **作用**：构造**环形/多版本缓冲**，让 copy/compute **重叠**执行。
-  * **单版本 vs 多版本**：
-
-    ```cpp
-    // 单版本（顺序）
-    __shared__ float A[128][64];
-    for (int i = 0; i < N; ++i) {
-      copy(global, A);
-      __syncthreads();
-      compute(A);
-      __syncthreads();
-    }
-
-    // 多版本（3 阶段流水）
-    __shared__ float A[3][128][64];  // stage ring
-    for (int i = 0; i < N; ++i) {
-      int stage = i % 3;
-      copy(global, A[stage]);            // 与上一 tile 的 compute 并发
-      compute(A[(stage - 1 + 3) % 3]);
-    }
-    ```
-  * **为何需要环形缓冲**：实现 `copy(i+1)` 与 `compute(i)` 并发，通常 2–5 个版本避免冲突。
+  - `MultiVersionBuffer` 将原本的 shared memory buffer 转换为多版本 buffer，在 shape 的第一维添加 **版本数（num_stages）**，使得流水线的不同阶段可以同时访问 buffer 的不同版本，实现内存加载 `copy(i+1)` 与计算 `compute(i)` 的重叠执行
+    - 顺序 
+      ```cpp
+      // 单版本（顺序）
+      __shared__ float A[128][64];
+      for (int i = 0; i < N; ++i) {
+        copy(global, A);
+        __syncthreads();
+        compute(A);
+        __syncthreads();
+      }
+      ```
+    - 3 阶段流水
+      ```cpp
+      __shared__ float A[3][128][64];  // stage ring
+      for (int i = 0; i < N; ++i) {
+        int stage = i % 3;
+        copy(global, A[stage]);            // 与上一 tile 的 compute 并发
+        compute(A[(stage - 1 + 3) % 3]);
+      }
+      ```
 
 * **Pass 5：WarpSpecialized**
 
@@ -447,9 +441,7 @@ else:
     configs = {"tl.disable_warp_specialized": True}
     ```
 
-#### 2.3 TMA Barrier 协议注入
-
-* **Pass 6：InjectTmaBarrier**
+#### Pass 6：InjectTmaBarrier
 
   * **位置**：`phase.py:130`
   * **注册**：`src/transform/inject_tma_barrier.cc:526`
@@ -474,24 +466,42 @@ else:
     configs = {"tl.disable_tma_lower": True}  # 强制禁用 TMA，回退 cp.async
     ```
 
-#### 2.4 寄存器预算与流水线规划
+#### Pass 7：AnnotateWarpGroupRegAlloc
 
-* **Pass 7：AnnotateWarpGroupRegAlloc**
+  - `AnnotateWarpGroupRegAlloc` 分析函数中的寄存器提示调用，并在 producer 和 consumer 分支中注入适当的 `set_max_nreg` 调用，降低溢出或提升并行度。
 
-  * **位置**：`phase.py:131`
-  * **注册**：`src/transform/annotate_warp_group_reg_alloc.cc:170`
-  * **作用**：为不同角色注入寄存器预算（Producer 少、Consumer 多），降低溢出或提升并行度。
+  - 实现
+    1. 收集：使用 `SetMaxNRegCollector` 类收集函数中的寄存器提示
+      - 识别 set_max_nreg() 调用，提取寄存器数量和增减标志，返回 `[dec_reg, inc_reg]` 数组
+      - 识别 no_set_max_nreg() 调用，标记禁用寄存器限制，返回 `[-1, -1]
+      - 检测是否已经存在自定义 warp specialization，返回 `[dec_reg, inc_reg]` 数组
+    2. 检测：使用 `SimtCopyDetector` 类检测是否存在 SIMT 拷贝操作，通过检查 BufferStore 的目标 scope 来判断，如果存储到非 global scope，则认为有 SIMT copy
+    3. 注入：使用 `SetMaxNRegInjector` 类注入
+      - 条件
+        - 必须有有效的寄存器提示（dec_reg >= 0 && inc_reg >= 0）
+        - 不能有 SIMT copy 操作
+      - 逻辑：识别 kWarpSpecializationScope 属性的 IfThenElse 结构
+        - 为 producer 分支注入 dec_reg_stmt（减少寄存器），默认为 24 个寄存器
+        - 为 consumer 分支注入 inc_reg_stmt（增加寄存器），默认为 240 个寄存器
+    4. 生成：在 CodeGen 环节`set_max_nreg` 调用最终会被降低为 PTX 指令
+      ``` cpp
+        std::string func_name = is_inc ? "tl::warpgroup_reg_alloc" : "tl::warpgroup_reg_dealloc";  
+        this->stream << func_name << "<" << std::to_string(nreg) << ">();\n";
+      ```
+      对应的 CUDA 模板实现
+      ``` cpp
+        template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {  
+          asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));  
+        }  
+          
+        template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {  
+          asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));  
+        }
+      ```
 
-    ```cpp
-    if (warp_role == Producer) asm volatile("setmaxnreg.sync %0;" :: "r"(32));
-    if (warp_role == Consumer) asm volatile("setmaxnreg.sync %0;" :: "r"(128));
-    ```
+#### Pass 8: PipelinePlanning & Pass 9: InjectSoftwarePipeline**
 
-* **Pass 8–9：PipelinePlanning + InjectSoftwarePipeline**
-
-  * **位置**：`phase.py:134-135`
-  * **注册**：`src/transform/pipeline_planning.cc:710`；`src/transform/inject_pipeline.cc:1007`
-  * **作用**：规划阶段/顺序/依赖并展开为 **prologue / steady / epilogue**。
+  * 这两个 Pass 负责分析循环体并生成高效的流水线代码（**prologue / steady / epilogue**）
 
     ```python
     loop.attr["software_pipeline_stage"] = [0, 1, 2]
@@ -508,6 +518,63 @@ else:
     // Epilogue
     stage1(tile=N-2); stage1(tile=N-1);
     ```
+
+  - `PipelinePlanning`是分析阶段，负责为循环体中的语句分配流水线阶段和执行顺序
+    1. 语句分类与依赖分析：通过 `BufferRegionCollector` 分析每个语句的 buffer 访问模式
+       - 识别 从 global 到 shared 的 copy 操作
+       - 分析 buffer 的读写依赖关系
+       - 构建异步依赖链（AsyncDependencyChainBuilder）
+    2. 建立 Producer-Consumer：通过 CopyStageDependencyReadsManager 建立 copy 操作与其依赖的传递关系
+       - 收集所有 copy 操作读取的 buffer
+       - 标记为 copy 操作生产数据的语句为 producer_for_copy
+       - 传递性地扩展依赖关系，直到收敛
+    3. 最后使用分析：为每个 copy 操作确定其数据的最后使用位置
+      ``` cpp
+        // 分析 use-def 链确定 last_use_stmt_index  
+        for (const BufferRegion &read : pipeline_stage_infos[i].reads) {  
+          if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),  
+                           [&](const BufferRegion &r) {  
+                             return r->buffer == read->buffer &&  
+                                    MayConflict(r->region, read->region);  
+                           }) != pinfo.writes.end()) {  
+            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);  
+          }  
+        }
+      ```
+    4. 阶段和顺序分配：基于依赖分析结果分配流水线阶段
+       - Copy 操作分配到 stage 0（早期阶段）
+       - 计算操作分配到 stage num_stages（后期阶段）
+       - 根据 last_use_stmt_index 优化 copy 操作的调度位置
+    5. 将分析结果以注解形式附加到循环上
+       - software_pipeline_stage：每个语句的流水线阶段
+       - software_pipeline_order：每个语句的执行顺序
+       - software_pipeline_async_stages：异步操作的阶段（通常是 stage 0）
+       - InjectSoftwarePipeline：流水线代码生成
+       
+  - `InjectSoftwarePipeline` 是代码生成阶段，将 `PipelinePlanning` 的注解转换为实际的流水线代码
+    1. 识别带有流水线注解的循环
+       ``` cpp
+      bool HasPipelineAnnotation(const ForNode *op) const {  
+        auto it1 = op->annotations.find(tir::attr::software_pipeline_stage);  
+        auto it2 = op->annotations.find(tir::attr::software_pipeline_order);  
+        return (it1 != op->annotations.end()) && (it2 != op->annotations.end());  
+      }
+    ```
+    2. 分析 buffer 访问模式并计算所需版本数
+      - 计算每个 buffer 的定义阶段（def）和最后使用阶段（use）
+      - 版本数 = use - def + 1，确保流水线各阶段不会产生数据竞争
+      - 调用 RewriteAllocBuffer 为需要版本化的 buffer 添加版本维度
+
+    3. 生成 prologue、body、epilogue 三个部分
+    ``` cpp
+    // Prologue: 预热阶段，填充流水线  
+    Stmt prologue = EmitImpl(pipeline_loop_->min, pipeline_loop_->min + max_stage_, true, true);  
+    // Body: 稳态阶段，流水线满载运行  
+    Stmt body = EmitImpl(pipeline_loop_->min + max_stage_, pipeline_loop_->min + pipeline_loop_->extent, false, false);  
+    // Epilogue: 排空阶段，清空流水线  
+    Stmt epilogue = EmitImpl(pipeline_loop_->min + pipeline_loop_->extent, pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
+    ```
+    4. PipelineBodyRewriter 重写 buffer 访问，添加版本索引 `PrimExpr new_index = old_index + floormod(pipeline_loop_->loop_var, new_buffer->shape[0]) * offset;`，确保不同迭代访问 
 
 #### 2.5 WGMMA 与控制流清理
 
