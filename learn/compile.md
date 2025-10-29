@@ -552,14 +552,15 @@ else:
        - InjectSoftwarePipeline：流水线代码生成
        
   - `InjectSoftwarePipeline` 是代码生成阶段，将 `PipelinePlanning` 的注解转换为实际的流水线代码
+    
     1. 识别带有流水线注解的循环
-       ``` cpp
-      bool HasPipelineAnnotation(const ForNode *op) const {  
-        auto it1 = op->annotations.find(tir::attr::software_pipeline_stage);  
-        auto it2 = op->annotations.find(tir::attr::software_pipeline_order);  
-        return (it1 != op->annotations.end()) && (it2 != op->annotations.end());  
-      }
-    ```
+      ``` cpp
+        bool HasPipelineAnnotation(const ForNode *op) const {  
+          auto it1 = op->annotations.find(tir::attr::software_pipeline_stage);  
+          auto it2 = op->annotations.find(tir::attr::software_pipeline_order);  
+          return (it1 != op->annotations.end()) && (it2 != op->annotations.end());  
+        }
+      ```
     2. 分析 buffer 访问模式并计算所需版本数
       - 计算每个 buffer 的定义阶段（def）和最后使用阶段（use）
       - 版本数 = use - def + 1，确保流水线各阶段不会产生数据竞争
@@ -567,12 +568,12 @@ else:
 
     3. 生成 prologue、body、epilogue 三个部分
     ``` cpp
-    // Prologue: 预热阶段，填充流水线  
-    Stmt prologue = EmitImpl(pipeline_loop_->min, pipeline_loop_->min + max_stage_, true, true);  
-    // Body: 稳态阶段，流水线满载运行  
-    Stmt body = EmitImpl(pipeline_loop_->min + max_stage_, pipeline_loop_->min + pipeline_loop_->extent, false, false);  
-    // Epilogue: 排空阶段，清空流水线  
-    Stmt epilogue = EmitImpl(pipeline_loop_->min + pipeline_loop_->extent, pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
+      // Prologue: 预热阶段，填充流水线  
+      Stmt prologue = EmitImpl(pipeline_loop_->min, pipeline_loop_->min + max_stage_, true, true);  
+      // Body: 稳态阶段，流水线满载运行  
+      Stmt body = EmitImpl(pipeline_loop_->min + max_stage_, pipeline_loop_->min + pipeline_loop_->extent, false, false);  
+      // Epilogue: 排空阶段，清空流水线  
+      Stmt epilogue = EmitImpl(pipeline_loop_->min + pipeline_loop_->extent, pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
     ```
     4. PipelineBodyRewriter 重写 buffer 访问，添加版本索引 `PrimExpr new_index = old_index + floormod(pipeline_loop_->loop_var, new_buffer->shape[0]) * offset;`，确保不同迭代访问 
 
