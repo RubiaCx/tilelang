@@ -1,4 +1,4 @@
-# 编译三阶段
+·# 编译三阶段·`
 
 | 阶段 | 名称                         | 核心文件                         | 主要工作                       |
 | -- | -------------------------- | ---------------------------- | -------------------------- |
@@ -322,10 +322,7 @@ T.atomic_add(ptr, val)
 
 ### Phase-2: OptimizeForTargetHardware
 
-### 1.1 核心分支：Hopper vs Ampere
-
-* **位置**：`tilelang/engine/phase.py:120`
-* **分支判断逻辑**：
+- Phase-2根据目标硬件的能力选择不同的优化路径并注入相应的优化
 
 ```python
 if have_tma(target) and not disable_warp_specialized and not disable_tma_lower:
@@ -341,23 +338,11 @@ else:
     # - commit_group/wait_group 同步
 ```
 
-* **关键能力判断函数**：
-
-```python
-from tilelang.contrib.nvcc import have_tma
-
-# 通常对应 sm_90+（Hopper）
-if have_tma(target):
-    print("支持 TMA！")
-```
-
 ---
 
-### 2. Hopper 优化路径：TMA + Warp Specialization
+### Hopper 优化路径：TMA + Warp Specialization
 
-#### 2.1 早期准备：共享资源初始化
-
-* **Pass 1：LowerSharedBarrier**
+#### Pass 1：LowerSharedBarrier
 
   * **位置**：`phase.py:123`
   * **注册**：`src/transform/lower_shared_barrier.cc:209`
@@ -562,29 +547,7 @@ if have_tma(target):
     fence.proxy.async.shared::cta;
     ```
 
-#### 2.7 Hopper 路径小结
-
-* 已创建并初始化 **mbarrier**（固定槽位）。
-* 构造 **多版本共享缓冲**，实现 copy/compute 重叠。
-* 改写为 **Warp Specialization**（Producer/Consumer）。
-* 注入 **TMA 协议**（expect_tx / arrive / wait_parity）。
-* 规划并展开 **软件流水线**（prologue/steady/epilogue）。
-* 重写 **WGMMA 同步**（`warpgroup_wait<N>`）。
-* 插入 **Fence Proxy** 保证异步写的可见性。
-* **验证命令**：
-
-  ```bash
-  # 检查 TMA
-  grep -E "tensormap|cp\.async\.bulk\.tensor" kernel.ptx
-  # 检查 mbarrier
-  grep -E "mbarrier\.(arrive|wait_parity|expect_tx)" kernel.ptx
-  # 检查 WGMMA
-  grep -E "wgmma\.mma_async|warpgroup_wait" kernel.ptx
-  # 检查 Fence
-  grep "fence.proxy.async" kernel.ptx
-  ```
-
----
+### 普通优化路径
 
 ### 3. 公共尾段优化
 
