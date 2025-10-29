@@ -250,30 +250,30 @@ T.atomic_add(ptr, val)
     - Reducer 的布局需要考虑线程间的数据复制和归约模式，因此需要特殊布局处理
 
 - `LayoutInference` 收集算子与循环的 use-def 关系，基于线程绑定与目标硬件，对 fragment / shared 的布局与并行循环的线程映射/谓词/向量化进行全局推断与改写，并把结果写回到 IR 注解与循环结构中，为后续 LowerTileOp、TMA/cp.async、向量化等优化做铺垫
-    1. `BufferUseDefCollector::Collect` 遍历 IR 收集所有`TileOperator`，构建 buffer 使用关系图
-        1. 收集
-            - 通过 `ParseOperator` 解析 Call 节点，提取 `TileOperator` 对象
-            - 收集每个操作访问的 buffer，构建 buffer 使用关系图（`use_list_` 映射：buffer → 使用 buffer 的 OP 索引列表）
-            - 记录每个操作的线程绑定信息 `thread_var_vec_` 和 buffer 越界状态`buffer_oob_vec_`
-            - 在 Block 节点中，收集用户通过 `attr::kLayoutMap` 注解指定的布局，作为推断的起点
-        2. 三级推断
-          1. 首先对所有操作执行严格推断 `InferLevel::kStrict`，每个 TileOperator 的 InferLayout 方法在此级别返回强制性的布局约束 `strict_layout_map`，作为后续推断的**不可变约束**
-            - GEMM 操作：根据目标架构（Volta/Ampere/Hopper）推断 A、B、C 矩阵的 fragment 布局
-            - Reduce 操作：根据源 fragment 布局推断目标布局 
-          2. 接下来进行通用推断 `InferLevel::kCommon`，使用 BFS 队列传播布局信息
-            - 当一个 buffer 的布局被确定后，将所有使用该 buffer 的操作加入队列
-            - 对队列中的操作调用 RunInferStep，尝试推断其他 buffer 的布局
-            - 如果新布局与已有布局冲突，进行兼容性检查（对于 fragment buffer，检查是否为包含关系） 
-          3. 对于仍未确定布局的 buffer，执行自由推断 `InferLevel::kFree`
-            - 使用 UnionFind 将操作分组为连通分量，即共享 buffer 的操作在同一分量
-            - 对每个分量，尝试以不同操作为根节点进行推断
-            - 选择**寄存器使用量最少**的推断方案
-    2. `LayoutInferencer` 类将推断的布局应用到 IR 上
-      - 将 `layout_map` 附加到 Block 节点的 `attr::kLayoutMap` 注解中
-      - 对于 `for_map` 中的循环（通常是 ParallelOp 生成的），执行：
-        -  根据 fragment 布局，通过 PartitionLoop循环分区到线程
-        - 如果循环访问非本地 buffer 且无 reducer，应用 VectorizeLoop
-        - 如果推断出谓词条件，用 IfThenElse 包装循环
+  1. `BufferUseDefCollector::Collect` 遍历 IR 收集所有`TileOperator`，构建 buffer 使用关系图
+    1. 收集
+        - 通过 `ParseOperator` 解析 Call 节点，提取 `TileOperator` 对象
+        - 收集每个操作访问的 buffer，构建 buffer 使用关系图（`use_list_` 映射：buffer → 使用 buffer 的 OP 索引列表）
+        - 记录每个操作的线程绑定信息 `thread_var_vec_` 和 buffer 越界状态`buffer_oob_vec_`
+        - 在 Block 节点中，收集用户通过 `attr::kLayoutMap` 注解指定的布局，作为推断的起点
+    2. 三级推断
+      1. 首先对所有操作执行严格推断 `InferLevel::kStrict`，每个 TileOperator 的 InferLayout 方法在此级别返回强制性的布局约束 `strict_layout_map`，作为后续推断的**不可变约束**
+          - GEMM 操作：根据目标架构（Volta/Ampere/Hopper）推断 A、B、C 矩阵的 fragment 布局
+          - Reduce 操作：根据源 fragment 布局推断目标布局
+      2. 接下来进行通用推断 `InferLevel::kCommon`，使用 BFS 队列传播布局信息
+          - 当一个 buffer 的布局被确定后，将所有使用该 buffer 的操作加入队列
+          - 对队列中的操作调用 RunInferStep，尝试推断其他 buffer 的布局
+          - 如果新布局与已有布局冲突，进行兼容性检查（对于 fragment buffer，检查是否为包含关系） 
+      3. 对于仍未确定布局的 buffer，执行自由推断 `InferLevel::kFree`
+          - 使用 UnionFind 将操作分组为连通分量，即共享 buffer 的操作在同一分量
+          - 对每个分量，尝试以不同操作为根节点进行推断
+          - 选择**寄存器使用量最少**的推断方案
+  2. `LayoutInferencer` 类将推断的布局应用到 IR 上
+    - 将 `layout_map` 附加到 Block 节点的 `attr::kLayoutMap` 注解中
+    - 对于 `for_map` 中的循环（通常是 ParallelOp 生成的），执行：
+      -  根据 fragment 布局，通过 PartitionLoop循环分区到线程
+      - 如果循环访问非本地 buffer 且无 reducer，应用 VectorizeLoop
+      - 如果推断出谓词条件，用 IfThenElse 包装循环
 
 - `attr::kLayoutMap` 是一个 Block 注解属性，用于存储 buffer 到[布局](https://github.com/tile-ai/tilelang/blob/main/src/layout/layout.h) 的映射
   - 注解方式
