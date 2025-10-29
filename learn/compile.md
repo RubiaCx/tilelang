@@ -182,24 +182,65 @@ T.atomic_add(ptr, val)
     - 值满足 `CanInlineLetStmt` 检查：常量、变量、是整数类型且没有副作用(side effect ≤ kPure)
     - 变量未在 buffer 定义中使用，即如果变量被用于 buffer 的 shape、strides 或其他定义字段，则不会被内联，从而避免 buffer 定义失效
     - 变量是多维 buffer 的别名，类似于 `X_shared = buffer[0:128, 0:32]`，且跨越超过 1 个非单位维度或包含向量通道，会被强制内联，避免了后续 pass(如 `Layout rewrite`、`FlattenBuffer`) 处理这些别名时出现问题
+    
 - 实现在 [src/transform/frontend_legalize.cc](https://github.com/RubiaCx/tilelang/blob/main/src/transform/frontend_legalize.cc)
 
 #### Pass 3：AddWrapperForSingleBufStore
 
 - `AddWrapperForSingleBufStore`用于为访问 fragment buffer 的单个 buffer store 语句（孤立的 `fragment[0]`）添加 `T.Parallel` 循环包装器，确保对这些 buffer 的访问符合 TileLang 的并行执行模型，用于后续的 `InjectAssumes` 和 `Simplify` Passes
+   - fragment buffer 是 TileLang 中用于寄存器级别数据的特殊 buffer 类型
+
+- 实现在 [tilelang/transform/add_bufstore_wrapper.py](https://github.com/tile-ai/tilelang/blob/main/tilelang/transform/add_bufstore_wrapper.py)
+  1.  使用 `ir_transform 遍历函数体`，通过 pre-visit 和 post-visit 两个阶段处理
+    a. pre-visit：跟踪 threadBinding 变量和 TileOperator 深度
+    b. post-visit：对 BufferStore 节点进行转换判断，满足条件的 buffer store 语句
+      - 访问 fragment buffer 且 fragment buffer 的所有索引都是 0 
+      - 不在现有的 TileOperator 内部：tile_operation_depth == 0
+      - 不在 threadBinding 内部
+  2. 满足条件的 BufferStore 会被包装在一个 For 循环中：
+    ``` python
+    For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)
+    ```
     ``` python
     # 用户写的代码
     acc = T.alloc_fragment([8, 8], "float32")
     acc[0] = initial_value  # 孤立写入
 
     # Pass 改写后
-    for _ in T.parallel(1):  # 包裹层
+    for _ in T.parallel(1):  # 包装器
         acc[0] = initial_value
     ```
-
+  
 #### Pass 4：InjectAssumes
 
+- `InjectAssumes` 为 buffer 的 shape 维度添加约束条件，，确保所有 shape 值大于 0，约束以 `AttrStmt` 节点的形式插入到 IR 中，属性名为 `tir::attr::tilelang_assume`，便于后续的 `Simplify` pass 进行更激进的优化
+
+- TVM 的证明器在处理符号化 shape 时需要额外的约束信息，通过显式注入 "shape > 0" 的假设，可以：
+  - 加速符号化表达式的简化
+  - 帮助证明器验证内存访问的合法性
+  - 支持更激进的优化决策，例如：
+    - 消除永远为真的边界检查
+    - 使用对齐的向量化加载（ldg.128 而非 ldg.64）
+      ``` python
+      // 注入后的伪代码
+      __assume(threadIdx.x < 256);
+      __assume((shared_ptr & 15) == 0);  // 16字节对齐
+      ```
+- 实现在 [src/transform/inject_assumes.cc](https://github.com/tile-ai/tilelang/blob/main/src/transform/inject_assumes.cc)
+
 #### Pass 5 & 12：Simplify
+
+- `Simplify` 使用 TVM 的 `arith::Analyzer` 作为底层简化引擎，并通过**配置选项**支持不同级别的激进优化，从而简化表达式，清理未使用的函数参数和 buffer
+  - 第一次调用在 `InjectAssumes` 之后，利用注入的约束进行初步简化
+  - 第二次调用在 `LegalizeSafeMemoryAccess` 之后，清理安全检查引入的冗余条件
+  - **配置选项**
+    - `transitively_prove_inequalities`：传递性不等式证明
+    - `propagate_knowns_to_prove_conditional`：传播已知值来证明条件-
+    - `propagate_knowns_to_simplify_expressions`：传播已知值来简化表达式
+    - `convert_boolean_to_and_of_ors`：将布尔表达式转换为 AND-OR 形
+    - `apply_constraints_to_boolean_branches`：对布尔分支应用约束
+
+- 实现在 [src/transform/simplify.cc](https://github.com/tile-ai/tilelang/blob/main/src/transform/simplify.cc)
 
 #### Pass 6：LayoutReducer & Pass 7：LayoutInference
 
@@ -209,12 +250,66 @@ T.atomic_add(ptr, val)
     - Reducer 的布局需要考虑线程间的数据复制和归约模式，因此需要特殊布局处理
 
 - `LayoutInference` 收集算子与循环的 use-def 关系，基于线程绑定与目标硬件，对 fragment / shared 的布局与并行循环的线程映射/谓词/向量化进行全局推断与改写，并把结果写回到 IR 注解与循环结构中，为后续 LowerTileOp、TMA/cp.async、向量化等优化做铺垫
-    1. 收集：`BufferUseDefCollector::Collect`
-        a. 扫描 Call（TileOp）与 For(kParallel)，构建推断对象列表 infer_list_、使用表 use_list_；
-        b.
-        c.
+    1. `BufferUseDefCollector::Collect` 遍历 IR 收集所有`TileOperator`，构建 buffer 使用关系图
+        1. 收集
+            - 通过 `ParseOperator` 解析 Call 节点，提取 `TileOperator` 对象
+            - 收集每个操作访问的 buffer，构建 buffer 使用关系图（`use_list_` 映射：buffer → 使用 buffer 的 OP 索引列表）
+            - 记录每个操作的线程绑定信息 `thread_var_vec_` 和 buffer 越界状态`buffer_oob_vec_`
+            - 在 Block 节点中，收集用户通过 `attr::kLayoutMap` 注解指定的布局，作为推断的起点
+        2. 三级推断
+          1. 首先对所有操作执行严格推断 `InferLevel::kStrict`，每个 TileOperator 的 InferLayout 方法在此级别返回强制性的布局约束 `strict_layout_map`，作为后续推断的**不可变约束**
+            - GEMM 操作：根据目标架构（Volta/Ampere/Hopper）推断 A、B、C 矩阵的 fragment 布局
+            - Reduce 操作：根据源 fragment 布局推断目标布局 
+          2. 接下来进行通用推断 `InferLevel::kCommon`，使用 BFS 队列传播布局信息
+            - 当一个 buffer 的布局被确定后，将所有使用该 buffer 的操作加入队列
+            - 对队列中的操作调用 RunInferStep，尝试推断其他 buffer 的布局
+            - 如果新布局与已有布局冲突，进行兼容性检查（对于 fragment buffer，检查是否为包含关系） 
+          3. 对于仍未确定布局的 buffer，执行自由推断 `InferLevel::kFree`
+            - 使用 UnionFind 将操作分组为连通分量，即共享 buffer 的操作在同一分量
+            - 对每个分量，尝试以不同操作为根节点进行推断
+            - 选择**寄存器使用量最少**的推断方案
     2. `LayoutInferencer` 类将推断的布局应用到 IR 上
+      - 将 `layout_map` 附加到 Block 节点的 `attr::kLayoutMap` 注解中
+      - 对于 `for_map` 中的循环（通常是 ParallelOp 生成的），执行：
+        -  根据 fragment 布局，通过 PartitionLoop循环分区到线程
+        - 如果循环访问非本地 buffer 且无 reducer，应用 VectorizeLoop
+        - 如果推断出谓词条件，用 IfThenElse 包装循环
 
+- `attr::kLayoutMap` 是一个 Block 注解属性，用于存储 buffer 到[布局](https://github.com/tile-ai/tilelang/blob/main/src/layout/layout.h) 的映射
+  - 注解方式
+    - 手动：`T.annotate_layout()`
+    - 自动：通过 `LayoutInference` pass 推断
+  - 分类
+    - Fragment Layout：用于 `local.fragment` scope 的 buffer，表示数据在寄存器中的分布模式
+      - makeGemmFragmentA/makeGemmFragmentACDNA：GEMM A 矩阵
+      - makeGemmFragmentB：GEMM B 矩阵
+      - makeGemmFragmentC/makeGemmFragmentCCDNA/makeGemmFragmentCHopper：GEMM 累加器 C 矩阵
+      - makeGemmVoltaFragmentC/makeGemmVoltaFragmentA：Volta 架构专用
+    - Shared Memory Layout：用于 `shared` 或 `shared.dyn` scope 的 buffer，优化 bank conflict 和内存访问模式
+      - Linear Layout：不同于Triton的Linear，我认为是命名问题
+        - makeGemmLayoutLinear：简单的行主序
+        - makeGemmABLayoutPadded：带 padding 的布局，避免 bank conflict
+      - Swizzle Layout：只支持了TMA所需的4种
+        - makeFullBankSwizzleLayout：128B swizzle
+        - makeHalfBankSwizzleLayout：64B swizzle
+        - makeQuarterBankSwizzleLayout：32B swizzle
+        ``` python
+        using Swizzle128B = cute::Swizzle<3, 4, 3>;
+        using Swizzle64B = cute::Swizzle<2, 4, 3>;
+        using Swizzle32B = cute::Swizzle<1, 4, 3>;
+        ```
+    - Tensor Memory Layout：用于 `shared.tmem` scope 的 buffer，使用特殊的 tensor memory 布局以使用 `TCGEN5MMA` 指令
+      - Layout D
+      - Layout E
+    - 架构特定
+      - makeGemmABLayout：通用的 Tensor Core 布局
+      - makeGemmABLayoutHopper：Hopper 架构（H100）的 WGMMA 布局
+      - makeGemmABLayoutSm100：Blackwell 架构（B100）的 TCGEN5MMA 布局
+      - makeGemmABLayoutCDNA：AMD CDNA 架构的布局
+      - makeGemmVoltaABLayout：Volta 架构的布局
+      - makeTensorOpMultiplicand：Tensor Core 操作数的通用布局
+      - makeGemmSparseAmpereABLayout：Ampere 稀疏 GEMM 的布局
+    
 #### Pass 8：LowerTileOp
 
 #### Pass 9：LowerL2Persistent
