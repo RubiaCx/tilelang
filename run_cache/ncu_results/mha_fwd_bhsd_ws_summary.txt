@@ -1,0 +1,50 @@
+[3440846] python3.12@127.0.0.1
+  main_kernel (64, 32, 4)x(384, 1, 1), Device 0, CC 9.0, Invocations 1
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------- ------- -------
+    Metric Name          Metric Unit Minimum Maximum Average
+    -------------------- ----------- ------- ------- -------
+    Executed Ipc Active   inst/cycle    1.46    1.46    1.46
+    Executed Ipc Elapsed  inst/cycle    1.45    1.45    1.45
+    Issue Slots Busy               %   36.52   36.52   36.52
+    Issued Ipc Active     inst/cycle    1.46    1.46    1.46
+    SM Busy                        %   50.69   50.69   50.69
+    -------------------- ----------- ------- ------- -------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------- ------------- -------------
+    Metric Name             Metric Unit       Minimum       Maximum       Average
+    ----------------------- ----------- ------------- ------------- -------------
+    DRAM Frequency                  Ghz          1.59          1.59          1.59
+    SM Frequency                    Ghz          1.12          1.12          1.12
+    Elapsed Cycles                cycle 18,706,662.00 18,706,662.00 18,706,662.00
+    Memory Throughput                 %         66.96         66.96         66.96
+    DRAM Throughput                   %          3.27          3.27          3.27
+    Duration                         ms         16.67         16.67         16.67
+    L1/TEX Cache Throughput           %         63.71         63.71         63.71
+    L2 Cache Throughput               %         66.96         66.96         66.96
+    SM Active Cycles              cycle 18,580,406.18 18,580,406.18 18,580,406.18
+    Compute (SM) Throughput           %         50.42         50.42         50.42
+    ----------------------- ----------- ------------- ------------- -------------
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ---------------- ---------------- ----------------
+    Metric Name                Metric Unit          Minimum          Maximum          Average
+    -------------------------- ----------- ---------------- ---------------- ----------------
+    Average DRAM Active Cycles       cycle       869,391.40       869,391.40       869,391.40
+    Total DRAM Elapsed Cycles        cycle 1,062,412,800.00 1,062,412,800.00 1,062,412,800.00
+    Average L1 Active Cycles         cycle    18,580,406.18    18,580,406.18    18,580,406.18
+    Total L1 Elapsed Cycles          cycle 2,129,679,564.00 2,129,679,564.00 2,129,679,564.00
+    Average L2 Active Cycles         cycle    18,180,563.36    18,180,563.36    18,180,563.36
+    Total L2 Elapsed Cycles          cycle 1,456,092,480.00 1,456,092,480.00 1,456,092,480.00
+    Average SM Active Cycles         cycle    18,580,406.18    18,580,406.18    18,580,406.18
+    Total SM Elapsed Cycles          cycle 2,129,679,564.00 2,129,679,564.00 2,129,679,564.00
+    Average SMSP Active Cycles       cycle    18,514,122.69    18,514,122.69    18,514,122.69
+    Total SMSP Elapsed Cycles        cycle 8,518,718,256.00 8,518,718,256.00 8,518,718,256.00
+    -------------------------- ----------- ---------------- ---------------- ----------------
+
+    Section: Instruction Statistics
+    ---------------------------------------- ----------- ---------------- ---------------- ----------------
+    Metric Name                              Metric Unit          Minimum          Maximum          Average
+    ---------------------------------------- ----------- ---------------- ---------------- ----------------
+    Avg. Executed Instructions Per Scheduler        inst     6,786,137.82     6,786,137.82     6,786,137.82

@@ -20,6 +20,7 @@
 debug/
 build/
 *dist/
+dist*/
 wheelhouse/
 __pycache__
 nnfusion.tar.gz
@@ -98,4 +99,6 @@ tilelang/jit/adapter/cython/.cycache
 # claude
 **/.claude
 
-run_cache/ncu_results/
+# CMake
+cmake-build/
+cmake-build-*/

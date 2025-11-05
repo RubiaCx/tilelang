@@ -131,13 +131,13 @@ public:
           ICHECK(dst_layout_opt.has_value())
               << "Failed to cast layout to Fragment for buffer " << buffer
               << ", layout type is " << layout->GetTypeKey();
-          auto dst_layout = dst_layout_opt.value();
+          const auto &dst_layout = dst_layout_opt.value();
           auto src_layout_opt = layout_map[buffer].as<Fragment>();
           ICHECK(src_layout_opt.has_value())
               << "Failed to cast layout_map[buffer] to Fragment for buffer "
               << buffer << ", layout type is "
               << layout_map[buffer]->GetTypeKey();
-          auto src_layout = src_layout_opt.value();
+          const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -159,7 +159,7 @@ public:
           }
         }
         // If already in map, ensure they are structurally equal
-        ICHECK(StructuralEqual()(layout, layout_map[buffer]))
+        ICHECK(layout->IsEqual(layout_map[buffer].get()))
             << "Get different layout for " << buffer
             << "\n current layout: " << layout->DebugOutput()
             << "\n previous layout: " << layout_map[buffer]->DebugOutput();
@@ -330,7 +330,7 @@ private:
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(GetRef<Call>(op), buffer_data_to_buffer_);
+    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op), buffer_data_to_buffer_);
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
@@ -381,7 +381,7 @@ private:
       }
 
       // Add the tile operator to infer_list_
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
     }
   }
@@ -398,7 +398,7 @@ private:
                       << call->args[1]->GetTypeKey();
         return std::nullopt;
       }
-      auto var = var_opt.value();
+      const auto &var = var_opt.value();
       return buffer_data_to_buffer_[var];
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
@@ -416,11 +416,11 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = ParallelOp(GetRef<For>(op));
+      auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
       if (thread_var_.defined() &&
@@ -597,7 +597,9 @@ private:
             }
           }
           // Update the best plan if this one uses fewer registers
-          if (reg_num < min_reg_num) {
+          if (reg_num < min_reg_num ||
+              (reg_num == min_reg_num &&
+               attempt_infer_root < min_reg_num_infer_root)) {
             best_infer_list =
                 BackupInferList(); // Use backup to avoid moving out infer_list_
             best_layout_map = tmp_layout_map;
@@ -636,7 +638,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition){};
+        skip_thread_partition_(skip_thread_partition) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
@@ -711,8 +713,8 @@ private:
                          .value();
 
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    if (result_.for_map.count(GetRef<For>(op))) {
-      auto root = GetRef<For>(op);
+    if (result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
+      auto root = tvm::ffi::GetRef<For>(op);
       // This check is a workaround to support T.Parallel for local buffers.
       // For example:
       //   for i in T.Parallel(1024):
@@ -787,7 +789,18 @@ private:
           }
       });
 
-      if (has_non_local && !has_reducer) {
+      // If a cast operation exists, vectorization may still be required
+      bool has_cast_operations = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          // Check if this is a non-reducer store with Cast operation
+          if (store->value.as<CastNode>()) {
+            has_cast_operations = true;
+          }
+        }
+      });
+
+      if ((has_non_local || has_cast_operations) && !has_reducer) {
         for_node = VectorizeLoop(for_node);
       }
 
@@ -831,10 +844,10 @@ tvm::transform::Pass LayoutInference() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
-});
+}
 
 } // namespace tl
 } // namespace tvm

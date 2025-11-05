@@ -1,6 +1,7 @@
+from __future__ import annotations
 import tilelang.language as T
 from enum import IntEnum
-from typing import Optional, Callable
+from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tir import PrimExpr, Buffer, Var, IndexMap
@@ -86,8 +87,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        thread_var: Optional[Var] = None,
+        is_m_first: bool | None = False,
+        thread_var: Var | None = None,
     ):
         super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
                          block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,
@@ -163,7 +164,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        scale_out = not clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
@@ -181,6 +181,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
         ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        accum_bits = DataType(accum_dtype).bits
+        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
@@ -242,15 +244,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
-            # TODO(lei): inject warpgroup_fence_operand for C_local_buf
-            desc_a = T.alloc_descriptor()
-            desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
-                                    int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            desc_a = T.alloc_wgmma_desc()
+            desc_b = T.alloc_wgmma_desc()
+            T.initialize_wgmma_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
+                                          int(a_leading_byte_offset >> 4),
+                                          int(a_stride_byte_offset >> 4))
+            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+                                          int(b_leading_byte_offset >> 4),
+                                          int(b_stride_byte_offset >> 4))
+            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
+                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                 for i in T.serial(m_dim // 64):
                     A_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
                         ki // ak_atom_size
@@ -266,6 +271,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                    scale_out, scale_in_a, scale_in_b)
             T.warpgroup_commit_batch()
             T.warpgroup_wait(0)
+            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
@@ -285,60 +291,70 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        scale_out = not clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
         elems_in_bytes = DataType(self.a_dtype).bits // 8
-
+        a_bits = DataType(self.a_dtype).bits
+        accum_bits = DataType(accum_dtype).bits
+        a_regs = ((warp_rows * local_size_a * (k_dim // micro_size_k)) * a_bits + 31) // 32
+        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
+        ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
                                                                                elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 *
-                                                                                  elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim *
+                                elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else
+                                                                      (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if b_is_k_major:
                 b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
             else:
                 # MN Major
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
-                    b_leading_byte_offset = 8 * b_swizzle_mode.swizzle_atom_size() * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
                 if b_n_axis_atoms <= 1:
                     b_stride_byte_offset = 8 * elems_in_bytes * n_dim
                 else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+
+        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
-            desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            desc_b = T.alloc_wgmma_desc()
+            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+                                          int(b_leading_byte_offset >> 4),
+                                          int(b_stride_byte_offset >> 4))
+            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
+            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
+                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                 for i in T.serial(m_dim // 64):
-                    k_dim_offset = ki * micro_size_k
                     A_offset = ki * warp_rows * local_size_a + i * local_size_a
-                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
+                    B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
+                        ki % bk_atom_size
+                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
                     T.ptx_wgmma_rs(
                         accum_dtype,
                         wgmma_prefix,
-                        self.a_transposed,
-                        not self.b_transposed,
+                        self.b_transposed,
                         a_dtype_abbrv,
                         b_dtype_abbrv,
                         accum_dtype_abbrv,
@@ -352,6 +368,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         scale_in_a,
                         scale_in_b,
                     )
+            T.warpgroup_commit_batch()
+            T.warpgroup_wait(0)
+            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
@@ -409,8 +429,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
             j, i)
 
-        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope())
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
 
         micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
 
