@@ -59,11 +59,11 @@
     
 #### JIT 入口
 
-- [`tilelang.jit`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/jit/__init__.py#L30) 为 TileLang 提供 auto-tuning 基础设施，使用 `tilelang.compile()` 或 `@tilelang.jit` 装饰器时，会触发编译流程，使用 TVM 将 TileLang TIR 编译为可运行的 JITKernel adapter，会在返回方法中进行缓存检查
+- [`tilelang.jit`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/jit/__init__.py#L30) 为 TileLang 提供 auto-tuning 基础设施，使用 `tilelang.compile()` 或 `@tilelang.jit` 装饰器时，会触发编译流程，使用 TVM 将 TileLang TIR 编译为可运行的 JITKernel adapter，会在返回方法中进行缓存检查
 
 #### 缓存检查
 
-- [`KernelCache`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/cache/kernel_cache.py#L30) 
+- [`KernelCache`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/cache/kernel_cache.py#L30) 
     1. 计算 $cache key = hash(IRModule + Target + PassConfigs)$
     2. 检查 `~/.tilelang/cache` 中的 cache value
 		- 命中，说明找到了对应的 JITKernel，直接返回
@@ -71,7 +71,7 @@
 
 #### 编译入口
 
-- 在 cache miss 时触发 [`JITKernel`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/cache/kernel_cache.py#L185) 的编译，在 [`JITKernel` 的 `__init__`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/jit/kernel.py#L121) 中 调用 `_compile_and_create_adapter` 构建 adapter，并进行编译参数准备，然后调用 [`tilelang.lower`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/jit/kernel.py#L219) 进行编译
+- 在 cache miss 时触发 [`JITKernel`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/cache/kernel_cache.py#L185) 的编译，在 [`JITKernel` 的 `__init__`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/jit/kernel.py#L121) 中 调用 `_compile_and_create_adapter` 构建 adapter，并进行编译参数准备，然后调用 [`tilelang.lower`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/jit/kernel.py#L219) 进行编译
     - 编译参数
         - `PassContext`
             - `opt_level=3`: 最高优化级别
@@ -121,7 +121,7 @@
 
 ### Phase-1: LowerAndLegalize
 
-- [`LowerAndLegalize`](https://github.com/RubiaCx/tilelang/blob/5475f8e7fa392f1ffb854098c313e917be636246/tilelang/engine/phase.py#L70) 阶段把 TIR 变成编译器能理解和优化的规范 TIR
+- [`LowerAndLegalize`](https://github.com/RubiaCx/tilelang/blob/main/tilelang/engine/phase.py#L70) 阶段把 TIR 变成编译器能理解和优化的规范 TIR
 	``` python
 	def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 		mod = tir.transform.BindTarget(target)(mod)
