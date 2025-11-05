@@ -19,11 +19,9 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=500, rep=100)
 @tilelang.jit(
-    out_idx=[3],
-    pass_configs={
+    out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    })
 def flashattn(
         batch,
         heads,
@@ -265,7 +263,7 @@ def main(batch: int = 1,
          seq_q: int = 256,
          seq_kv: int = 256,
          dim: int = 128,
-         window_size: int | None = None,
+         window_size: Optional[int] = None,
          dtype: str = "float16",
          tune: bool = False):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]

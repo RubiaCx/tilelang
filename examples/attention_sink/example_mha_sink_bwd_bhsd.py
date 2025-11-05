@@ -20,11 +20,9 @@ def get_bwd_configs():
 
 
 @tilelang.jit(
-    out_idx=[3, 4],
-    pass_configs={
+    out_idx=[3, 4], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    })
 def flashattn_fwd(
         batch,
         heads,
@@ -137,11 +135,9 @@ def flashattn_fwd(
 
 
 @tilelang.jit(
-    out_idx=[2],
-    pass_configs={
+    out_idx=[2], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    })
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -177,11 +173,9 @@ def make_dq_layout(dQ):
 
 
 @tilelang.jit(
-    out_idx=[1],
-    pass_configs={
+    out_idx=[1], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    })
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -202,11 +196,9 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"
     return flash_bwd_post
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+@tilelang.jit(pass_configs={
+    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+})
 def flashattn_bwd(
     batch,
     heads,
@@ -448,7 +440,7 @@ def main(BATCH: int = 1,
          H: int = 1,
          N_CTX: int = 512,
          D_HEAD: int = 128,
-         window_size: int | None = None,
+         window_size: Optional[int] = None,
          dtype: str = "float16"):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:

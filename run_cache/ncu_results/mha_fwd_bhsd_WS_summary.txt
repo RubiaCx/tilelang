@@ -1,0 +1,2 @@
+==ERROR== Could not open report file '/home/chenxi/tilelang/cache/ncu_results/mha_fwd_bhsd_WS.ncu-rep'.
+==ERROR== The file does not exist or is not a regular file.
