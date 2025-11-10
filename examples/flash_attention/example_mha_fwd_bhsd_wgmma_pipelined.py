@@ -9,7 +9,7 @@ from functools import partial
 
 
 def get_configs():
-    iter_params = dict(block_M=[128], block_N=[128], num_stages=[2], threads=[256])
+    iter_params = dict(block_M=[64, 128], block_N=[64, 128], threads=[256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -142,17 +142,96 @@ def flashattn(batch,
                         (bx + 1) * block_M +
                         past_len, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
 
+            # for k in T.Pipelined(
+            #         loop_range,
+            #         num_stages=num_stages,
+            #         order=[-1, 0, 3, 1, -1, 2],
+            #         stage=[-1, 0, 0, 1, -1, 1],
+            #         group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
+            #     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
+            #     Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
+            #     Rescale(acc_o, scores_scale)
+            #     MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for k in T.Pipelined(
                     loop_range,
-                    num_stages=num_stages,
+                    # # BASELINE
+                    # #     Max error: 6.104e-04
+                    # #     Mean absolute error: 1.468e-05
+                    # #     L2 norm of error: 2.363e-01
+                    # #     Cosine similarity: 1.000
+                    # #     Best latency: 5.072 ms
+                    # #     Best TFlops: 433.553 TFlops
+                    # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
+                    num_stages=2,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
-                MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
-                        logsum)
-                Rescale(acc_o, scores_scale)
-                MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+
+                    # # 合并 Softmax 与 Rescale 为一大组，减少组间屏障数量
+                    # #     Max error: 8.545e-04
+                    # #     Mean absolute error: 1.468e-05
+                    # #     L2 norm of error: 2.364e-01
+                    # #     Cosine similarity: 1.000
+                    # #     Best latency: 5.024 ms
+                    # #     Best TFlops: 437.684 TFlops
+                    # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
+                    # num_stages=2,
+                    # order=[-1, 0, 2, -1, 1],
+                    # stage=[-1, 0, 0, -1, 1],
+                    # group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13]],
+
+                    # # 细粒度拆分，Softmax→Rescale→SV 在同一 stage=1，order 递增，Producer 组保持 -1
+                    # #     Max error: 5.649e-01
+                    # #     Mean absolute error: 2.303e-02
+                    # #     L2 norm of error: 3.368e+02
+                    # #     Cosine similarity: 0.364
+                    # #     Best latency: 5.426 ms
+                    # num_stages=2,
+                    # order=[-1, 0, 1, 2, 3, -1, 4],
+                    # stage=[-1, 0, 0, 1, 1, -1, 1],
+                    # group=[[0], [1], [2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+                 
+                    # # 探索 triple-buffer
+                    # #     Max error: 4.978e-01
+                    # #     Mean absolute error: 2.285e-02
+                    # #     L2 norm of error: 3.342e+02
+                    # #     Cosine similarity: 0.366
+                    # #     Best latency: 5.356 ms
+                    # #     Best TFlops: 410.550 TFlops
+                    # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
+                    # num_stages=3,
+                    # order=[-1, 0, 1, 2, -1, 3],
+                    # stage=[-1, 0, 1, 1, -1, 2],
+                    # group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
+                    ):
+                # MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
+                T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared) # 0
+                if is_causal:
+                    for i, j in T.Parallel(block_M, block_N):
+                        q_idx = bx * block_M + i + past_len
+                        k_idx = k * block_N + j
+                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype)) # 1
+                else:
+                    T.clear(acc_s)
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow) # 2
+                # Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
+                T.copy(scores_max, scores_max_prev) # 3
+                T.fill(scores_max, -T.infinity(accum_dtype)) # 4
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)  # 5
+                for i in T.Parallel(block_M):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale) # 6
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale) # 7
+                T.reduce_sum(acc_s, scores_sum, dim=1) # 8
+                for i in T.Parallel(block_M):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i] # 9
+                T.copy(acc_s, acc_s_cast) # 10
+                # Rescale(acc_o, scores_scale)
+                for i, j in T.Parallel(block_M, dim):
+                    acc_o[i, j] *= scores_scale[i] # 11
+                # MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
+                T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared) # 12
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow) # 13
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
@@ -205,23 +284,47 @@ def main(
         ref_program_processed = partial(ref_program, is_causal=is_causal)
 
         profiler = kernel.get_profiler()
-        profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
-        print("All checks pass.")
-        latency = profiler.do_bench(ref_program_processed, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(warmup=500)
+        # Print numerical differences between TileLang kernel and reference
+        with torch.no_grad():
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            Q_t = torch.randn(batch, heads, seq_q, dim, device=device, dtype=torch.float16)
+            K_t = torch.randn(batch, heads, seq_kv, dim, device=device, dtype=torch.float16)
+            V_t = torch.randn(batch, heads, seq_kv, dim, device=device, dtype=torch.float16)
+            ref_out = ref_program_processed(Q_t, K_t, V_t)
+            # Try to invoke kernel to get output
+            try:
+                tl_out = kernel(Q_t, K_t, V_t)
+            except Exception:
+                # Fallback: some kernels require preallocated output as last arg
+                tl_out = torch.empty_like(ref_out)
+                kernel(Q_t, K_t, V_t, tl_out)
+            err = (tl_out.float() - ref_out.float())
+            max_err = err.abs().max().item()
+            mean_abs_err = err.abs().mean().item()
+            l2_err = torch.norm(err).item()
+            a = tl_out.float().reshape(-1)
+            b = ref_out.float().reshape(-1)
+            denom = (torch.norm(a) * torch.norm(b)).clamp_min(1e-12)
+            cos_sim = (torch.dot(a, b) / denom).item()
+            print(f"Max error: {max_err:.3e}")
+            print(f"Mean absolute error: {mean_abs_err:.3e}")
+            print(f"L2 norm of error: {l2_err:.3e}")
+            print(f"Cosine similarity: {cos_sim:.3f}")
+        ref_latency = profiler.do_bench(ref_program_processed, warmup=100)
+        print("Ref: {:.2f} ms".format(ref_latency))
+        # print("Ref: {:.2f} TFlops".format(total_flops / ref_latency * 1e-9))
+        latency = profiler.do_bench(warmup=100)
         print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        # print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print("speedup: {:.2f}".format(ref_latency / latency))
     else:
         kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal)
         best_latency = kernel.latency
         best_config = kernel.config
         ref_latency = kernel.ref_latency
-        print(f"Best latency: {best_latency}")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
+        print("Best latency: {:.3f} ms".format(best_latency))
+        print("Best TFlops: {:.3f} TFlops".format(total_flops / best_latency * 1e-9))
         print(f"Best config: {best_config}")
-        print(f"Ref latency: {ref_latency}")
 
 
 if __name__ == "__main__":

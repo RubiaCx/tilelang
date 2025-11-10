@@ -127,7 +127,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
-
+    # print(mod)
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
@@ -142,14 +142,14 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         print("WarpSpecialized")
         print(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
-        print("InjectTmaBarrier")
-        print(mod)
+        # print("InjectTmaBarrier")
+        # print(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        print("InjectSoftwarePipeline")
-        print(mod)
+        # print("InjectSoftwarePipeline")
+        # print(mod)
         # warp_specialized pass will pack the if stmt into the block
         # so we need to lower the opaque block first
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
@@ -157,8 +157,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         if is_hopper(target):
             mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
-        print("Final")
-        print(mod)
+        # print("Final")
+        # print(mod)
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
