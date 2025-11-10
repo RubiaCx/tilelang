@@ -9,6 +9,7 @@ import threading
 import uuid
 from hashlib import sha256
 from typing import Callable, Literal
+import re
 
 import cloudpickle
 from tvm.target import Target
@@ -91,7 +92,30 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         self.execution_backend = execution_backend
-        func_binary = cloudpickle.dumps(func.script(show_meta=True))
+        func_script = func.script(show_meta=True)
+        func_binary = cloudpickle.dumps(func_script)
+        # Extract pipeline annotations to force cache refresh when they change
+        annotation_keys = [
+            "tl_pipeline_order",
+            "tl_pipeline_stage",
+            "tl_pipeline_group",
+            "software_pipeline_order",
+            "software_pipeline_stage",
+            "num_stages",
+        ]
+        extracted_annos: dict[str, str | None] = {}
+        for key in annotation_keys:
+            value_str: str | None = None
+            m = re.search(rf'"{key}"\s*:\s*(\[[^\]]*\])', func_script)
+            if m:
+                value_str = m.group(1)
+            else:
+                m2 = re.search(rf'{key}\s*=\s*(\[[^\]]*\])', func_script)
+                if m2:
+                    value_str = m2.group(1)
+            extracted_annos[key] = value_str
+        anno_items = [f"{k}={extracted_annos[k] or 'None'}" for k in annotation_keys]
+        anno_fingerprint = sha256("|".join(anno_items).encode()).hexdigest()
         key_data = {
             "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
@@ -104,6 +128,7 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
+            "pipeline_annotations": anno_fingerprint,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
