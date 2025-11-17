@@ -244,8 +244,8 @@ private:
       auto it_r = last_read_index.find(buffer.get());
       if (it_w != first_write_index.end() && it_r != last_read_index.end() &&
           it_w->second < it_r->second) {
-        if (!is_copy_stage(it_w->second))
-          continue;
+        // if (!is_copy_stage(it_w->second)) // 本地/fragment 的读写不属于“Producer copy stage”
+        //   continue;
         versioned_buffers.push_back(buffer);
       }
     }
@@ -362,7 +362,7 @@ private:
         continue;
       // Only double-buffer shared allocations; locals do not need versioning.
       auto scope = buffer.scope();
-      if (!(scope == "shared" || scope == "shared.dyn"))
+      if (!(scope == "shared" || scope == "shared.dyn" || scope == "local"))
         continue;
       if (seen.insert(buffer.get()).second) {
         scoped_buffers.push_back(buffer);
@@ -377,7 +377,7 @@ private:
         continue;
       for (const Buffer &buffer : map_it->second) {
         auto scope = buffer.scope();
-        if (!(scope == "shared" || scope == "shared.dyn"))
+        if (!(scope == "shared" || scope == "shared.dyn" || scope == "local"))
           continue;
         if (seen.insert(buffer.get()).second) {
           scoped_buffers.push_back(buffer);
