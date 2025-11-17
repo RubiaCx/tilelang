@@ -9,7 +9,7 @@ from functools import partial
 
 
 def get_configs():
-    iter_params = dict(block_M=[64, 128], block_N=[64, 128], threads=[256])
+    iter_params = dict(block_M=[64, 128], block_N=[32, 64, 128], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -55,7 +55,9 @@ def flashattn(batch,
                 k_idx = k * block_N + j
                 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         else:
-            T.clear(acc_s)
+            # We shall fill -inf for OOB positions
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_kv, -T.infinity(acc_s.dtype), 0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -162,10 +164,10 @@ def flashattn(batch,
                     # #     Best latency: 5.072 ms
                     # #     Best TFlops: 433.553 TFlops
                     # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    num_stages=2,
-                    order=[-1, 0, 3, 1, -1, 2],
-                    stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+                    # num_stages=2,
+                    # order=[-1, 0, 3, 1, -1, 2],
+                    # stage=[-1, 0, 0, 1, -1, 1],
+                    # group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
 
                     # # 合并 Softmax 与 Rescale 为一大组，减少组间屏障数量
                     # #     Max error: 8.545e-04
@@ -199,10 +201,10 @@ def flashattn(batch,
                     # #     Best latency: 5.356 ms
                     # #     Best TFlops: 410.550 TFlops
                     # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    # num_stages=3,
-                    # order=[-1, 0, 1, 2, -1, 3],
-                    # stage=[-1, 0, 1, 1, -1, 2],
-                    # group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
+                    num_stages=3,
+                    order=[-1, 0, 1, 2, -1, 3],
+                    stage=[-1, 0, 1, 1, -1, 2],
+                    group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
                     ):
                 # MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared) # 0

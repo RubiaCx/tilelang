@@ -36,6 +36,8 @@ public:
 
   Role GetRole(const Stmt &stmt) const { return GetRole(stmt.get()); }
 
+  // 识别纯函数调用的statement(EvaluateNode)中的tma_load()或tma_load_im2col()，
+  // 这些函数调用会触发TMA load/store操作，因此这些statement的role为kProducer
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
@@ -48,16 +50,14 @@ public:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool is_shared_store =
-        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
+    bool is_shared_store = op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
     if (!is_shared_store) {
       SetRole(op, Role::kConsumer);
       return;
     }
 
     // Check reads from global
-    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ tvm::ffi::GetRef<Stmt>(op));
+    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"", /*body*/ tvm::ffi::GetRef<Stmt>(op));
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -207,10 +207,10 @@ private:
     };
     for (size_t i = 0; i < pipeline_stmts.size(); i++) {
       bool copy_stage = is_copy_stage(i);
-      bool is_producer = roles[i] == Role::kProducer ||
-                         (roles[i] == Role::kBoth && copy_stage);
-      bool is_consumer = roles[i] == Role::kConsumer ||
-                         (roles[i] == Role::kBoth && !copy_stage);
+      bool is_producer = roles[i] == Role::kProducer || 
+                        (roles[i] == Role::kBoth && copy_stage);
+      bool is_consumer = roles[i] == Role::kConsumer || 
+                        (roles[i] == Role::kBoth && !copy_stage);
       if (is_producer) {
         for (BufferRegion br : writes[i]) {
           producer_used.insert(br->buffer.get());
@@ -242,10 +242,9 @@ private:
       // multiple stages even if role classification missed one side.
       auto it_w = first_write_index.find(buffer.get());
       auto it_r = last_read_index.find(buffer.get());
-      if (it_w != first_write_index.end() && it_r != last_read_index.end() &&
-          it_w->second < it_r->second) {
-        // if (!is_copy_stage(it_w->second)) // 本地/fragment 的读写不属于“Producer copy stage”
-        //   continue;
+      if (it_w != first_write_index.end() && it_r != last_read_index.end() && it_w->second < it_r->second) {
+        if (!is_copy_stage(it_w->second)) // 本地/fragment 的读写不属于“Producer copy stage”
+          continue;
         versioned_buffers.push_back(buffer);
       }
     }
@@ -362,7 +361,7 @@ private:
         continue;
       // Only double-buffer shared allocations; locals do not need versioning.
       auto scope = buffer.scope();
-      if (!(scope == "shared" || scope == "shared.dyn" || scope == "local"))
+      if (!(scope == "shared" || scope == "shared.dyn")) //  || scope == "local"
         continue;
       if (seen.insert(buffer.get()).second) {
         scoped_buffers.push_back(buffer);
@@ -377,7 +376,7 @@ private:
         continue;
       for (const Buffer &buffer : map_it->second) {
         auto scope = buffer.scope();
-        if (!(scope == "shared" || scope == "shared.dyn" || scope == "local"))
+        if (!(scope == "shared" || scope == "shared.dyn")) //  || scope == "local"
           continue;
         if (seen.insert(buffer.get()).second) {
           scoped_buffers.push_back(buffer);

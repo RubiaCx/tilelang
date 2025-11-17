@@ -120,8 +120,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
-    # Try to vectorize loop with dynamic shape
-    mod = tilelang.transform.LoopVectorizeDynamic()(mod)
     return mod
 
 
@@ -138,9 +136,25 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         print("MultiVersionBuffer")
         print(mod)
+
+        # # Allow users to disable MultiVersionBuffer for advanced manual
+        # # triple-buffer / pipeline control (e.g. FA3-style kernels).
+        # #
+        # # Usage:
+        # #   with tilelang.transform.PassContext(
+        # #       config={"tl.disable_multi_version_buffer": True}
+        # #   ):
+        # #       ...
+        # disable_multi_version_buffer = pass_ctx.config.get(
+        #     "tl.disable_multi_version_buffer", False)
+        # if not disable_multi_version_buffer:
+        #     mod = tilelang.transform.MultiVersionBuffer()(mod)
+        #     print("MultiVersionBuffer")
+        #     print(mod)
+
         mod = tilelang.transform.WarpSpecialized()(mod)
         print("WarpSpecialized")
-        print(mod)
+        # print(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
         # print("InjectTmaBarrier")
         # print(mod)
