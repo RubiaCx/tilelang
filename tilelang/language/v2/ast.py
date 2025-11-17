@@ -469,6 +469,7 @@ class DSLMutator(ast.NodeTransformer):
         return self._emit_assign_target(node.target, rval, annot=node.annotation)
 
     def visit_While(self, node):
+        node = self.generic_visit(node)
         return quote1(
             "for _ in __tb.ctx_while(lambda: cond):\n  pass",
             cond=node.test,
@@ -553,7 +554,7 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Name(self, node: ast.Name):
         if isinstance(node.ctx, ast.Load):
-            return quote_expr(f"__tb.rval('{node.id}', {node.id})", span=node)
+            return quote_expr(f"__tb.rval('{node.id}', node)", node=node, span=node)
         return node
 
 
