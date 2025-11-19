@@ -1,3 +1,5 @@
+import os
+import sys
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -6,6 +8,26 @@ import tilelang.language as T
 import itertools
 import argparse
 from functools import partial
+
+
+def maybe_load_flash_attn_func():
+    try:
+        from flash_attn_interface import flash_attn_func
+        return flash_attn_func
+    except Exception:
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(here))
+        parent = os.path.dirname(repo_root)
+        repo_test = os.path.join(parent, "flash-attention", "hopper")
+        if os.path.isdir(repo_test):
+            if repo_test not in sys.path:
+                sys.path.insert(0, repo_test)
+            try:
+                from flash_attn_interface import flash_attn_func
+                return flash_attn_func
+            except Exception:
+                return None
+        return None
 
 
 def get_configs():
@@ -285,42 +307,83 @@ def main(
             block_N=128,
             num_stages=2,
             threads=256)
-        ref_program_processed = partial(ref_program, is_causal=is_causal)
 
         profiler = kernel.get_profiler()
-        # Print numerical differences between TileLang kernel and reference
+
+        # Prepare random inputs once for all baselines
         with torch.no_grad():
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             Q_t = torch.randn(batch, heads, seq_q, dim, device=device, dtype=torch.float16)
             K_t = torch.randn(batch, heads, seq_kv, dim, device=device, dtype=torch.float16)
             V_t = torch.randn(batch, heads, seq_kv, dim, device=device, dtype=torch.float16)
-            ref_out = ref_program_processed(Q_t, K_t, V_t)
-            # Try to invoke kernel to get output
+
+            # SDPA baseline (both accuracy and performance)
+            sdpa_out = F.scaled_dot_product_attention(
+                Q_t, K_t, V_t, is_causal=is_causal
+            )
+
+            # TileLang kernel output (handle both 3-arg and 4-arg calling convention)
             try:
                 tl_out = kernel(Q_t, K_t, V_t)
             except Exception:
-                # Fallback: some kernels require preallocated output as last arg
-                tl_out = torch.empty_like(ref_out)
+                tl_out = torch.empty_like(sdpa_out)
                 kernel(Q_t, K_t, V_t, tl_out)
-            err = (tl_out.float() - ref_out.float())
+
+        def compute_err(out, ref):
+            err = (out.float() - ref.float())
             max_err = err.abs().max().item()
             mean_abs_err = err.abs().mean().item()
             l2_err = torch.norm(err).item()
-            a = tl_out.float().reshape(-1)
-            b = ref_out.float().reshape(-1)
+            a = out.float().reshape(-1)
+            b = ref.float().reshape(-1)
             denom = (torch.norm(a) * torch.norm(b)).clamp_min(1e-12)
             cos_sim = (torch.dot(a, b) / denom).item()
-            print(f"Max error: {max_err:.3e}")
-            print(f"Mean absolute error: {mean_abs_err:.3e}")
-            print(f"L2 norm of error: {l2_err:.3e}")
-            print(f"Cosine similarity: {cos_sim:.3f}")
-        ref_latency = profiler.do_bench(ref_program_processed, warmup=100)
-        print("Ref: {:.2f} ms".format(ref_latency))
-        # print("Ref: {:.2f} TFlops".format(total_flops / ref_latency * 1e-9))
-        latency = profiler.do_bench(warmup=100)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        # print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        print("speedup: {:.2f}".format(ref_latency / latency))
+            return max_err, mean_abs_err, l2_err, cos_sim
+
+        rows = []
+
+        # SDPA timing
+        def run_sdpa(*_args, **_kwargs):
+            F.scaled_dot_product_attention(Q_t, K_t, V_t, is_causal=is_causal)
+
+        sdpa_ms = profiler.do_bench(run_sdpa, warmup=100)
+        rows.append(("SDPA", sdpa_ms, total_flops / sdpa_ms * 1e-9, 0.0, 0.0, 1.0))
+
+        # TileLang timing and accuracy vs SDPA
+        tl_ms = profiler.do_bench(lambda *_, **__: kernel(Q_t, K_t, V_t), warmup=100)
+        max_err, mean_abs_err, l2_err, cos_sim = compute_err(tl_out, sdpa_out)
+        rows.append(("TileLang", tl_ms, total_flops / tl_ms * 1e-9, max_err, mean_abs_err, cos_sim))
+
+        # Optional FlashAttention baseline (if available)
+        flash_attn_func = maybe_load_flash_attn_func()
+        if flash_attn_func is not None and device.type == "cuda":
+            with torch.no_grad():
+                q = Q_t.detach().transpose(1, 2).clone().requires_grad_(False)
+                k = K_t.detach().transpose(1, 2).clone().requires_grad_(False)
+                v = V_t.detach().transpose(1, 2).clone().requires_grad_(False)
+                fa_out, _ = flash_attn_func(q, k, v, causal=is_causal, num_splits=0)
+                fa_out = fa_out.transpose(1, 2).contiguous()
+            torch.cuda.synchronize()
+
+            def run_flash(*_args, **_kwargs):
+                flash_attn_func(q, k, v, causal=is_causal, num_splits=0)
+
+            fa_ms = profiler.do_bench(run_flash, warmup=100)
+            max_err_fa, mean_err_fa, l2_err_fa, cos_sim_fa = compute_err(fa_out, sdpa_out)
+            rows.append(("FlashAttn", fa_ms, total_flops / fa_ms * 1e-9, max_err_fa, mean_err_fa, cos_sim_fa))
+
+        # Pretty table: SDPA as baseline for both accuracy and performance
+        print("\n=== Forward FlashAttention (SDPA baseline) ===")
+        header = "{:<12} {:>10} {:>10} {:>12} {:>12} {:>10}".format(
+            "Kernel", "Time(ms)", "TFLOPs", "MaxErr", "MeanErr", "CosSim"
+        )
+        print(header)
+        print("-" * len(header))
+        for name, ms, tflops, max_e, mean_e, cos in rows:
+            print(
+                f"{name:<12} {ms:>10.2f} {tflops:>10.2f} "
+                f"{max_e:>12.3e} {mean_e:>12.3e} {cos:>10.3f}"
+            )
     else:
         kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal)
         best_latency = kernel.latency
@@ -335,8 +398,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='batch size')
     parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='query sequence length')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='key/value sequence length')
+    parser.add_argument('--seq_q', type=int, default=8192, help='query sequence length')
+    parser.add_argument('--seq_kv', type=int, default=8192, help='key/value sequence length')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
