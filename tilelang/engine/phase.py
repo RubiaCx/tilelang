@@ -135,7 +135,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         print("MultiVersionBuffer")
-        print(mod)
+        # print(mod)
 
         # # Allow users to disable MultiVersionBuffer for advanced manual
         # # triple-buffer / pipeline control (e.g. FA3-style kernels).
