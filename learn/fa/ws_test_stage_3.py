@@ -1,5 +1,5 @@
-# from tvm.script import ir as I
-# from tvm.script import tir as T
+from tvm.script import ir as I
+from tvm.script import tir as T
 
 @I.ir_module
 class Module:
@@ -21,7 +21,6 @@ class Module:
             scores_scale = T.Buffer((2,), scope="local")
             logsum = T.Buffer((2,), scope="local")
             acc_o = T.Buffer((64,), scope="local")
-            T.block_attr({"layout_map": {scores_max_prev: metadata["tl.Fragment"][0], scores_max: metadata["tl.Fragment"][1], scores_sum: metadata["tl.Fragment"][2], acc_s: metadata["tl.Fragment"][3], acc_s_cast: metadata["tl.Fragment"][4], scores_scale: metadata["tl.Fragment"][5], logsum: metadata["tl.Fragment"][6], acc_o: metadata["tl.Fragment"][7]}})
             bx = T.launch_thread("blockIdx.x", 32)
             by = T.launch_thread("blockIdx.y", 32)
             bz = T.launch_thread("blockIdx.z", 8)
@@ -32,7 +31,6 @@ class Module:
                 loop_range = T.int32()
                 T.reads(Q[bz, by, bx * 128, 0], K[bz, by, 0:loop_range * 128 - 127, 0], V[bz, by, 0:loop_range * 128 - 127, 0], Output[bz, by, bx * 128, 0])
                 T.writes()
-                T.block_attr({"layout_map": {scores_max_prev: metadata["tl.Fragment"][0], scores_max: metadata["tl.Fragment"][1], scores_sum: metadata["tl.Fragment"][2], acc_s: metadata["tl.Fragment"][3], acc_s_cast: metadata["tl.Fragment"][4], scores_scale: metadata["tl.Fragment"][5], logsum: metadata["tl.Fragment"][6], acc_o: metadata["tl.Fragment"][7]}})
                 Q_shared = T.alloc_buffer((2, 16, 512), "float16", scope="shared.dyn")
                 K_shared = T.alloc_buffer((3, 2, 16, 512), "float16", scope="shared.dyn")
                 V_shared = T.alloc_buffer((3, 2, 16, 512), "float16", scope="shared.dyn")

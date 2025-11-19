@@ -164,10 +164,10 @@ def flashattn(batch,
                     # #     Best latency: 5.072 ms
                     # #     Best TFlops: 433.553 TFlops
                     # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    # num_stages=2,
-                    # order=[-1, 0, 3, 1, -1, 2],
-                    # stage=[-1, 0, 0, 1, -1, 1],
-                    # group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+                    num_stages=2,
+                    order=[-1, 0, 3, 1, -1, 2],
+                    stage=[-1, 0, 0, 1, -1, 1],
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
 
                     # # 合并 Softmax 与 Rescale 为一大组，减少组间屏障数量
                     # #     Max error: 8.545e-04
@@ -201,10 +201,10 @@ def flashattn(batch,
                     # #     Best latency: 5.356 ms
                     # #     Best TFlops: 410.550 TFlops
                     # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    num_stages=3,
-                    order=[-1, 0, 1, 2, -1, 3],
-                    stage=[-1, 0, 1, 1, -1, 2],
-                    group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
+                    # num_stages=3,
+                    # order=[-1, 0, 1, 2, -1, 3],
+                    # stage=[-1, 0, 1, 1, -1, 2],
+                    # group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
                     ):
                 # MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared) # 0

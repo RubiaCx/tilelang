@@ -12,7 +12,7 @@ from tvm import ir as I, tir  # type: ignore
 from tvm.target import Target  # type: ignore
 import tilelang
 from tilelang.engine.phase import LowerAndLegalize, OptimizeForTarget
-from tilelang.learn.fa.ws_test_stage_3 import Module  # 你的 TIR 文件
+from ws_test_stage_3 import Module  # 你的 TIR 文件
 
 target = Target("cuda -arch=sm_90")
 
