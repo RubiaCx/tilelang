@@ -65,13 +65,20 @@ def main():
     parser.add_argument("--stats", action="store_true", help="print simple output stats")
     parser.add_argument("--rebuild", action="store_true", help="force rebuild via nvcc before running")
     parser.add_argument("--arch", default=None, help="gpu arch, e.g., sm_90; default: auto-detect")
+    parser.add_argument("--fast_math", action="store_true", help="enable nvcc --use_fast_math when rebuilding")
+    parser.add_argument("--maxrregcount", type=int, default=None, help="cap register count via nvcc --maxrregcount")
     parser.add_argument("--check", action="store_true", help="check correctness against PyTorch SDPA")
     parser.add_argument("--atol", type=float, default=1e-2, help="absolute tolerance for correctness check")
     parser.add_argument("--rtol", type=float, default=1e-4, help="relative tolerance for correctness check")
     args = parser.parse_args()
 
     if args.rebuild:
-        recompile_cache(args.cache_dir, arch=args.arch)
+        extra_flags = []
+        if args.fast_math:
+            extra_flags.append("--use_fast_math")
+        if args.maxrregcount is not None:
+            extra_flags.append(f"--maxrregcount={args.maxrregcount}")
+        recompile_cache(args.cache_dir, arch=args.arch, extra_nvcc_flags=extra_flags)
 
     params = parse_wrapped_kernel_params(args.cache_dir)
     k = KernelLib(args.cache_dir)
