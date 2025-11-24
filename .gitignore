@@ -108,3 +108,8 @@ cmake-build-*/
 
 # pre-commit cache
 .pre-commit-cache/*
+
+# NCU profiling results (large files)
+*.ncu-rep
+cache/ncu_results/
+run_cache/ncu_results/
