@@ -62,19 +62,19 @@ fi
 # 仅分析 main_kernel
 KERNEL_FILTER="main_kernel"
 
-# 直接调用脚本，避免模块路径问题
 PYTHON_BIN=$(which python)
 
 set -x
 "${PYTHON_BIN}" -V >/dev/null 2>&1 || { echo "python 未找到"; exit 1; }
 
+# 这里使用模块形式，调用 run_cache.test，内部会处理 cache 格式与运行逻辑
 ncu \
   --set full \
   --kernel-name "${KERNEL_FILTER}" \
   --force-overwrite \
   --import-source yes \
   -o "${REP_PATH}" \
-  "${PYTHON_BIN}" /home/chenxi/tilelang/cache/test.py --cache_dir "${CACHE_DIR}" \
+  "${PYTHON_BIN}" -m run_cache.test --cache_dir "${CACHE_DIR}" \
     --stats ${REBUILD_FLAG} --arch "${ARCH}"
 set +x
 

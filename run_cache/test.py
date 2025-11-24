@@ -1,16 +1,31 @@
 import argparse
 import math
+import os
+import sys
+
 import torch
 import torch.nn.functional as F
+
 try:
-    from .runner import KernelLib, parse_wrapped_kernel_params, recompile_cache
+    # 作为包运行: 例如 `python -m run_cache.test`
+    from .runner import (
+        recompile_cache,
+        detect_cache_format,
+        create_kernel_and_inputs,
+    )
 except ImportError:
-    # 允许脚本直接执行: 将项目根目录加入 sys.path 后使用绝对导入
-    import sys, os
-    # __file__ = /home/chenxi/tilelang/cache/test.py
-    # 需要加入 /home/chenxi (项目根)
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-    from tilelang.cache.runner import KernelLib, parse_wrapped_kernel_params, recompile_cache
+    # 允许脚本直接执行: `python test.py`（当前文件位于 /home/chenxi/tilelang/run_cache/test.py）
+    # 将项目根目录 (/home/chenxi/tilelang) 加到 sys.path，然后用顶层模块导入
+    THIS_DIR = os.path.dirname(os.path.abspath(__file__))          # .../tilelang/run_cache
+    PROJECT_ROOT = os.path.dirname(THIS_DIR)                       # .../tilelang
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    # 此时可以直接从顶层模块 `run_cache.runner` 导入
+    from run_cache.runner import (
+        recompile_cache,
+        detect_cache_format,
+        create_kernel_and_inputs,
+    )
 
 
 def check_correctness_with_sdpa(Q, K, V, O_tl, params, atol=1e-2, rtol=1e-4):
@@ -72,6 +87,11 @@ def main():
     parser.add_argument("--rtol", type=float, default=1e-4, help="relative tolerance for correctness check")
     args = parser.parse_args()
 
+    # 检测 cache 格式
+    cache_format = detect_cache_format(args.cache_dir)
+    format_name = "旧格式 (old)" if cache_format == "old" else "新格式 (new)"
+    print(f"检测到 cache 格式: {format_name}")
+    
     if args.rebuild:
         extra_flags = []
         if args.fast_math:
@@ -80,11 +100,7 @@ def main():
             extra_flags.append(f"--maxrregcount={args.maxrregcount}")
         recompile_cache(args.cache_dir, arch=args.arch, extra_nvcc_flags=extra_flags)
 
-    params = parse_wrapped_kernel_params(args.cache_dir)
-    k = KernelLib(args.cache_dir)
-    k.load()
-    k.init()
-    Q, K, V, O = k.allocate_random_inputs(params, device=args.device)
+    params, k, Q, K, V, O = create_kernel_and_inputs(args.cache_dir, device=args.device)
     O = k.run_with_tensors(Q, K, V, O)
 
     if args.stats:

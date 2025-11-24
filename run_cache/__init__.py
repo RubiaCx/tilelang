@@ -7,14 +7,34 @@
 
 from .runner import (
     KernelLib,
+    OldKernelLib,
+    NewKernelLib,
+    KernelParams,
     parse_wrapped_kernel_params,
+    parse_wrapped_kernel_params_old,
+    parse_wrapped_kernel_params_new,
     infer_required_shape,
+    detect_cache_format,
+    recompile_cache,
+    recompile_cache_old,
+    recompile_cache_new,
+    create_kernel_and_inputs,
 )
 
 __all__ = [
+    "KernelParams",
     "KernelLib",
+    "OldKernelLib",
+    "NewKernelLib",
     "parse_wrapped_kernel_params",
+    "parse_wrapped_kernel_params_old",
+    "parse_wrapped_kernel_params_new",
     "infer_required_shape",
+    "detect_cache_format",
+    "recompile_cache",
+    "recompile_cache_old",
+    "recompile_cache_new",
+    "create_kernel_and_inputs",
 ]
 
 
