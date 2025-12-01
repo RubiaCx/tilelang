@@ -29,6 +29,7 @@ def matmul_non_persistent(M,
             C_shared = T.alloc_shared((block_M, block_N), dtype)
 
             T.use_swizzle(10)
+            # T.use_swizzle(panel_size=10, enable=True)
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -121,8 +122,8 @@ def ref_program(A, B):
 def main(M=4096, N=4096, K=4096):
     total_flops = 2 * M * N * K
 
-    BLOCK_M = 128
-    BLOCK_N = 256
+    BLOCK_M = 256
+    BLOCK_N = 128
     BLOCK_K = 64
     threads = 256
     num_stages = 3

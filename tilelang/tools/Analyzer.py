@@ -6,7 +6,7 @@ from tvm.tir.stmt_functor import ir_transform
 import logging
 # Configuration for different hardware architectures.
 # Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
-ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
+ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128), "90": (128, 1.755, 2, 114)}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -137,9 +137,12 @@ class Analyzer:
                     # Handle Evaluate nodes containing calls
                     value = stmt.value
                     if isinstance(value, tvm.tir.Call):
-                        if value.op.name == "tl.copy":
+                        op_name = value.op.name
+                        if op_name == "tl.copy":
                             self._analyze_copy(value)
-                        elif value.op.name == "tl.gemm":
+                        # tl.gemm_py is the lowered GEMM op; its args layout matches tl.gemm (see src/op/gemm_py.cc), 
+                        # so we reuse the same FLOPs accounting.
+                        elif op_name in ("tl.gemm", "tl.gemm_py"):
                             self._analyze_gemm(value)
                 return None
 
