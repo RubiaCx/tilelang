@@ -191,73 +191,12 @@ def flashattn(batch,
                     num_stages=2,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
-
-                    # # 合并 Softmax 与 Rescale 为一大组，减少组间屏障数量
-                    # #     Max error: 8.545e-04
-                    # #     Mean absolute error: 1.468e-05
-                    # #     L2 norm of error: 2.364e-01
-                    # #     Cosine similarity: 1.000
-                    # #     Best latency: 5.024 ms
-                    # #     Best TFlops: 437.684 TFlops
-                    # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    # num_stages=2,
-                    # order=[-1, 0, 2, -1, 1],
-                    # stage=[-1, 0, 0, -1, 1],
-                    # group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13]],
-
-                    # # 细粒度拆分，Softmax→Rescale→SV 在同一 stage=1，order 递增，Producer 组保持 -1
-                    # #     Max error: 5.649e-01
-                    # #     Mean absolute error: 2.303e-02
-                    # #     L2 norm of error: 3.368e+02
-                    # #     Cosine similarity: 0.364
-                    # #     Best latency: 5.426 ms
-                    # num_stages=2,
-                    # order=[-1, 0, 1, 2, 3, -1, 4],
-                    # stage=[-1, 0, 0, 1, 1, -1, 1],
-                    # group=[[0], [1], [2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
-                 
-                    # # 探索 triple-buffer
-                    # #     Max error: 4.978e-01
-                    # #     Mean absolute error: 2.285e-02
-                    # #     L2 norm of error: 3.342e+02
-                    # #     Cosine similarity: 0.366
-                    # #     Best latency: 5.356 ms
-                    # #     Best TFlops: 410.550 TFlops
-                    # #     Best config: {'block_M': 128, 'block_N': 128, 'threads': 256}
-                    # num_stages=3,
-                    # order=[-1, 0, 1, 2, -1, 3],
-                    # stage=[-1, 0, 1, 1, -1, 2],
-                    # group=[[0], [1, 2], [3,4,5,6,7,8,9,10], [11], [12], [13]],
-                    ):
-                # MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared) # 0
-                if is_causal:
-                    for i, j in T.Parallel(block_M, block_N):
-                        q_idx = bx * block_M + i + past_len
-                        k_idx = k * block_N + j
-                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype)) # 1
-                else:
-                    T.clear(acc_s)
-                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow) # 2
-                # Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
-                T.copy(scores_max, scores_max_prev) # 3
-                T.fill(scores_max, -T.infinity(accum_dtype)) # 4
-                T.reduce_max(acc_s, scores_max, dim=1, clear=False)  # 5
-                for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale) # 6
-                for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale) # 7
-                T.reduce_sum(acc_s, scores_sum, dim=1) # 8
-                for i in T.Parallel(block_M):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i] # 9
-                T.copy(acc_s, acc_s_cast) # 10
-                # Rescale(acc_o, scores_scale)
-                for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] *= scores_scale[i] # 11
-                # MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
-                T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared) # 12
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow) # 13
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13], [14]]):
+                MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
+                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
+                        logsum)
+                Rescale(acc_o, scores_scale)
+                MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)

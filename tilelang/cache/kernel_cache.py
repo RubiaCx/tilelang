@@ -9,7 +9,6 @@ import threading
 import uuid
 from hashlib import sha256
 from typing import Callable, Literal
-import re
 
 import cloudpickle
 from tvm.target import Target
@@ -129,7 +128,6 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
-            "pipeline_annotations": anno_fingerprint,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)

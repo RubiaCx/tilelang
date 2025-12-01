@@ -57,7 +57,8 @@ public:
     }
 
     // Check reads from global
-    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"", /*body*/ tvm::ffi::GetRef<Stmt>(op));
+    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
+                /*body*/ tvm::ffi::GetRef<Stmt>(op));
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -207,10 +208,10 @@ private:
     };
     for (size_t i = 0; i < pipeline_stmts.size(); i++) {
       bool copy_stage = is_copy_stage(i);
-      bool is_producer = roles[i] == Role::kProducer || 
-                        (roles[i] == Role::kBoth && copy_stage);
-      bool is_consumer = roles[i] == Role::kConsumer || 
-                        (roles[i] == Role::kBoth && !copy_stage);
+      bool is_producer = roles[i] == Role::kProducer ||
+                         (roles[i] == Role::kBoth && copy_stage);
+      bool is_consumer = roles[i] == Role::kConsumer ||
+                         (roles[i] == Role::kBoth && !copy_stage);
       if (is_producer) {
         for (BufferRegion br : writes[i]) {
           producer_used.insert(br->buffer.get());
@@ -242,8 +243,9 @@ private:
       // multiple stages even if role classification missed one side.
       auto it_w = first_write_index.find(buffer.get());
       auto it_r = last_read_index.find(buffer.get());
-      if (it_w != first_write_index.end() && it_r != last_read_index.end() && it_w->second < it_r->second) {
-        if (!is_copy_stage(it_w->second)) // 本地/fragment 的读写不属于“Producer copy stage”
+      if (it_w != first_write_index.end() && it_r != last_read_index.end() &&
+          it_w->second < it_r->second) {
+        if (!is_copy_stage(it_w->second))
           continue;
         versioned_buffers.push_back(buffer);
       }
@@ -361,7 +363,7 @@ private:
         continue;
       // Only double-buffer shared allocations; locals do not need versioning.
       auto scope = buffer.scope();
-      if (!(scope == "shared" || scope == "shared.dyn")) //  || scope == "local"
+      if (!(scope == "shared" || scope == "shared.dyn"))
         continue;
       if (seen.insert(buffer.get()).second) {
         scoped_buffers.push_back(buffer);
@@ -376,7 +378,7 @@ private:
         continue;
       for (const Buffer &buffer : map_it->second) {
         auto scope = buffer.scope();
-        if (!(scope == "shared" || scope == "shared.dyn")) //  || scope == "local"
+        if (!(scope == "shared" || scope == "shared.dyn"))
           continue;
         if (seen.insert(buffer.get()).second) {
           scoped_buffers.push_back(buffer);
